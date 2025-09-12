@@ -1,5 +1,7 @@
 package com.ai.assistance.operit.terminal.view
 
+import android.os.Build
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -18,6 +20,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -36,36 +39,41 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.ai.assistance.operit.terminal.TerminalViewModel
+import com.ai.assistance.operit.terminal.data.CommandHistoryItem
+import com.ai.assistance.operit.terminal.data.TerminalSessionData
 import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.abs
 
+@RequiresApi(Build.VERSION_CODES.O)
 @Composable
-fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
-    // 会话相关状态
-    val sessions by terminalViewModel.sessions.collectAsState()
-    val currentSessionId by terminalViewModel.currentSessionId.collectAsState()
-    
-    // 当前会话的状态
-    val commandHistory by terminalViewModel.commandHistory.collectAsState()
-    val currentDirectory by terminalViewModel.currentDirectory.collectAsState()
-    var command by remember { mutableStateOf("") }
+public fun TerminalScreen(
+    sessions: List<TerminalSessionData>,
+    currentSessionId: String?,
+    commandHistory: List<CommandHistoryItem>,
+    currentDirectory: String,
+    command: String,
+    onCommandChange: (String) -> Unit,
+    onSendCommand: (String) -> Unit,
+    onInterrupt: () -> Unit,
+    onNewSession: () -> Unit,
+    onSwitchSession: (String) -> Unit,
+    onCloseSession: (String) -> Unit
+) {
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
-    
+
     // 语法高亮
     val visualTransformation = remember { SyntaxHighlightingVisualTransformation() }
 
     // 缩放状态
     var scaleFactor by remember { mutableStateOf(1f) }
-    
+
     // 删除确认弹窗状态
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var sessionToDelete by remember { mutableStateOf<String?>(null) }
-    
+
     // 计算基于缩放因子的字体大小和间距
     val baseFontSize = 14.sp
     val fontSize = with(LocalDensity.current) { 
@@ -94,12 +102,8 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
         SessionTabBar(
             sessions = sessions,
             currentSessionId = currentSessionId,
-            onSessionClick = { sessionId ->
-                terminalViewModel.switchToSession(sessionId)
-            },
-            onNewSession = {
-                terminalViewModel.createNewSession()
-            },
+            onSessionClick = onSwitchSession,
+            onNewSession = onNewSession,
             onCloseSession = { sessionId ->
                 sessionToDelete = sessionId
                 showDeleteConfirmDialog = true
@@ -138,7 +142,7 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(padding)
                 ) {
-                    items(commandHistory) { historyItem ->
+                    items(commandHistory, key = { it.id }) { historyItem ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             // Prompt as a label
                             Surface(
@@ -201,6 +205,13 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
                     }
                 }
                 
+                // 终端工具栏
+                TerminalToolbar(
+                    onInterrupt = onInterrupt,
+                    fontSize = fontSize * 0.8f,
+                    padding = padding
+                )
+                
                 // 当前输入行
                 Row(
                     modifier = Modifier
@@ -223,7 +234,7 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
                     }
                     BasicTextField(
                         value = command,
-                        onValueChange = { command = it },
+                        onValueChange = onCommandChange,
                         modifier = Modifier.weight(1f),
                         textStyle = TextStyle(
                             color = SyntaxColors.commandDefault,
@@ -235,8 +246,7 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = {
                             if (command.isNotBlank()) {
-                                terminalViewModel.sendCommand(command)
-                                command = ""
+                                onSendCommand(command)
                             }
                         })
                     )
@@ -270,7 +280,7 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
                 TextButton(
                     onClick = {
                         sessionToDelete?.let { sessionId ->
-                            terminalViewModel.closeSession(sessionId)
+                            onCloseSession(sessionId)
                         }
                         showDeleteConfirmDialog = false
                         sessionToDelete = null
@@ -304,7 +314,7 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
 
 @Composable
 private fun SessionTabBar(
-    sessions: List<com.ai.assistance.operit.terminal.TerminalSessionData>,
+    sessions: List<TerminalSessionData>,
     currentSessionId: String?,
     onSessionClick: (String) -> Unit,
     onNewSession: () -> Unit,
@@ -356,7 +366,7 @@ private fun SessionTabBar(
 
 @Composable
 private fun SessionTab(
-    session: com.ai.assistance.operit.terminal.TerminalSessionData,
+    session: TerminalSessionData,
     isActive: Boolean,
     onClick: () -> Unit,
     onClose: (() -> Unit)?
@@ -396,6 +406,71 @@ private fun SessionTab(
                     )
                 }
             }
+        }
+    }
+} 
+
+@Composable
+private fun TerminalToolbar(
+    onInterrupt: () -> Unit,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    padding: androidx.compose.ui.unit.Dp
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFF1A1A1A),
+        shadowElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = padding, vertical = padding * 0.5f),
+            horizontalArrangement = Arrangement.spacedBy(padding * 0.5f),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Ctrl+C 中断按钮
+            Surface(
+                modifier = Modifier.clickable { onInterrupt() },
+                color = Color(0xFF4A4A4A),
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
+                ) {
+                    Text(
+                        text = "Ctrl+C",
+                        color = Color.White,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = fontSize,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "中断",
+                        color = Color.Gray,
+                        fontFamily = FontFamily.Default,
+                        fontSize = fontSize * 0.9f
+                    )
+                }
+            }
+            
+            // 分隔线
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(padding * 1.5f)
+                    .background(Color(0xFF3A3A3A))
+            )
+            
+            // 提示文本
+            Text(
+                text = "快捷键操作",
+                color = Color(0xFF666666),
+                fontFamily = FontFamily.Default,
+                fontSize = fontSize * 0.85f,
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 } 
