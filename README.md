@@ -1,4 +1,4 @@
-﻿# Assistance BuzyBox
+﻿# Operit Terminal
 
 一个在Android上运行Ubuntu环境的终端应用。
 
