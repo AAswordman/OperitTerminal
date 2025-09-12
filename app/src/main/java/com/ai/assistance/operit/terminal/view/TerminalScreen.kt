@@ -56,6 +56,9 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     
+    // 语法高亮
+    val visualTransformation = remember { SyntaxHighlightingVisualTransformation() }
+
     // 缩放状态
     var scaleFactor by remember { mutableStateOf(1f) }
     
@@ -136,21 +139,36 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
                     contentPadding = PaddingValues(padding)
                 ) {
                     items(commandHistory) { historyItem ->
-                        // 显示命令
-                        Text(
-                            text = "${historyItem.prompt}${historyItem.command}",
-                            color = Color.Green,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = fontSize,
-                            lineHeight = fontSize * lineHeight,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = padding * 0.25f)
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Prompt as a label
+                            Surface(
+                                modifier = Modifier.padding(end = padding * 0.5f),
+                                color = Color(0xFF006400), // DarkGreen
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = historyItem.prompt.trimEnd(),
+                                    color = Color.White,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = fontSize,
+                                    modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
+                                )
+                            }
+                            // Command
+                            Text(
+                                text = highlight(historyItem.command, isCommand = true),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = fontSize,
+                                lineHeight = fontSize * lineHeight
+                            )
+                        }
+                        // Spacer
+                        Spacer(modifier = Modifier.height(padding * 0.25f))
+
                         // 显示输出
                         if (historyItem.output.isNotEmpty()) {
                             Text(
-                                text = historyItem.output,
+                                text = highlight(historyItem.output),
                                 color = Color.White,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = fontSize,
@@ -187,20 +205,28 @@ fun TerminalScreen(terminalViewModel: TerminalViewModel = viewModel()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(padding)
+                        .padding(padding),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = currentDirectory.ifEmpty { "$ " },
-                        color = Color.Green,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = fontSize
-                    )
+                    Surface(
+                        modifier = Modifier.padding(end = padding * 0.5f),
+                        color = Color(0xFF006400), // DarkGreen
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = currentDirectory.ifEmpty { "$ " }.trimEnd(),
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = fontSize,
+                            modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
+                        )
+                    }
                     BasicTextField(
                         value = command,
                         onValueChange = { command = it },
                         modifier = Modifier.weight(1f),
                         textStyle = TextStyle(
-                            color = Color.Green,
+                            color = SyntaxColors.commandDefault,
                             fontFamily = FontFamily.Monospace,
                             fontSize = fontSize
                         ),
