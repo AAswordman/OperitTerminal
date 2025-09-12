@@ -7,10 +7,12 @@ import androidx.annotation.RequiresApi
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
+import java.util.UUID
 
 data class CommandHistoryItem(
     val prompt: String,
@@ -19,29 +21,42 @@ data class CommandHistoryItem(
     val isExecuting: Boolean = false
 )
 
+// 单个终端会话的数据类
+data class TerminalSessionData(
+    val id: String = UUID.randomUUID().toString(),
+    val title: String,
+    val terminalSession: TerminalSession? = null,
+    val sessionWriter: OutputStreamWriter? = null,
+    val currentDirectory: String = "$ ",
+    val commandHistory: List<CommandHistoryItem> = emptyList(),
+    val currentCommandOutputBuilder: StringBuilder = StringBuilder(),
+    val isWaitingForInteractiveInput: Boolean = false,
+    val lastInteractivePrompt: String = "",
+    val isInteractiveMode: Boolean = false,
+    val interactivePrompt: String = "",
+    val isInitializing: Boolean = true,
+    val readJob: Job? = null  // 添加读取协程的Job引用
+)
+
 @RequiresApi(Build.VERSION_CODES.O)
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
 
     private val terminalManager = TerminalManager(application)
-    private var terminalSession: TerminalSession? = null
-    private var sessionWriter: OutputStreamWriter? = null
-
-    private val _terminalOutput = MutableStateFlow("Initializing environment...\n")
-    val terminalOutput = _terminalOutput.asStateFlow()
     
+    // 多会话管理
+    private val _sessions = MutableStateFlow<List<TerminalSessionData>>(emptyList())
+    val sessions = _sessions.asStateFlow()
+    
+    private val _currentSessionId = MutableStateFlow<String?>(null)
+    val currentSessionId = _currentSessionId.asStateFlow()
+    
+    // 当前会话的状态（为了向后兼容）
     private val _currentDirectory = MutableStateFlow("$ ")
     val currentDirectory = _currentDirectory.asStateFlow()
     
     private val _commandHistory = MutableStateFlow<List<CommandHistoryItem>>(emptyList())
     val commandHistory = _commandHistory.asStateFlow()
     
-    private var currentCommandOutputBuilder = StringBuilder()
-    
-    // 添加交互模式状态
-    private var isWaitingForInteractiveInput = false
-    private var lastInteractivePrompt = ""
-    
-    // 暴露交互状态给UI
     private val _isInteractiveMode = MutableStateFlow(false)
     val isInteractiveMode = _isInteractiveMode.asStateFlow()
     
@@ -49,108 +64,205 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     val interactivePrompt = _interactivePrompt.asStateFlow()
 
     init {
-        _commandHistory.value = listOf(CommandHistoryItem("", "Initializing environment...", "", false))
-        initialize()
+        // 创建第一个会话
+        createNewSession()
     }
 
-    private fun initialize() {
+    fun createNewSession() {
+        val sessionCount = _sessions.value.size + 1
+        val newSession = TerminalSessionData(
+            title = "Ubuntu $sessionCount",
+            commandHistory = listOf(CommandHistoryItem("", "Initializing environment...", "", false))
+        )
+        
+        _sessions.value = _sessions.value + newSession
+        _currentSessionId.value = newSession.id
+        updateCurrentSessionStates()
+        
+        initializeSession(newSession.id)
+    }
+    
+    fun switchToSession(sessionId: String) {
+        if (_sessions.value.any { it.id == sessionId }) {
+            _currentSessionId.value = sessionId
+            updateCurrentSessionStates()
+        }
+    }
+    
+    fun closeSession(sessionId: String) {
+        val sessionToClose = _sessions.value.find { it.id == sessionId }
+        sessionToClose?.let { session ->
+            try {
+                // 首先取消读取协程
+                session.readJob?.cancel()
+                
+                // 然后关闭流和进程
+                session.sessionWriter?.close()
+                session.terminalSession?.process?.destroy()
+            } catch (e: Exception) {
+                Log.e("TerminalViewModel", "Error closing session", e)
+            }
+        }
+        
+        val updatedSessions = _sessions.value.filter { it.id != sessionId }
+        _sessions.value = updatedSessions
+        
+        // 如果关闭的是当前会话，切换到第一个可用会话
+        if (_currentSessionId.value == sessionId) {
+            _currentSessionId.value = updatedSessions.firstOrNull()?.id
+            updateCurrentSessionStates()
+        }
+        
+        // 如果没有会话了，创建一个新的
+        if (updatedSessions.isEmpty()) {
+            createNewSession()
+        }
+    }
+    
+    private fun updateCurrentSessionStates() {
+        val currentSession = getCurrentSession()
+        currentSession?.let { session ->
+            _currentDirectory.value = session.currentDirectory
+            _commandHistory.value = session.commandHistory
+            _isInteractiveMode.value = session.isInteractiveMode
+            _interactivePrompt.value = session.interactivePrompt
+        }
+    }
+    
+    private fun getCurrentSession(): TerminalSessionData? {
+        return _currentSessionId.value?.let { sessionId ->
+            _sessions.value.find { it.id == sessionId }
+        }
+    }
+    
+    private fun updateSession(sessionId: String, updater: (TerminalSessionData) -> TerminalSessionData) {
+        _sessions.value = _sessions.value.map { session ->
+            if (session.id == sessionId) {
+                updater(session)
+            } else {
+                session
+            }
+        }
+        
+        // 如果更新的是当前会话，同时更新当前状态
+        if (_currentSessionId.value == sessionId) {
+            updateCurrentSessionStates()
+        }
+    }
+
+    private fun initializeSession(sessionId: String) {
         viewModelScope.launch {
             val success = terminalManager.initializeEnvironment()
             if (success) {
-                // _terminalOutput.value += "Environment initialized. Starting session...\n"
-                appendOutputToHistory("Environment initialized. Starting session...")
-                startSession()
+                appendOutputToHistory(sessionId, "Environment initialized. Starting session...")
+                startSession(sessionId)
             } else {
-                // _terminalOutput.value += "FATAL: Environment initialization failed. Check logs.\n"
-                appendOutputToHistory("FATAL: Environment initialization failed. Check logs.")
+                appendOutputToHistory(sessionId, "FATAL: Environment initialization failed. Check logs.")
             }
         }
     }
 
-    private fun startSession() {
+    private fun startSession(sessionId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                terminalSession = terminalManager.startTerminalSession()
-                sessionWriter = terminalSession?.stdin?.writer()
-                // _terminalOutput.value += "Session started.\n"
-                appendOutputToHistory("Session started.")
+                val terminalSession = terminalManager.startTerminalSession()
+                val sessionWriter = terminalSession.stdin.writer()
+                
+                appendOutputToHistory(sessionId, "Session started.")
                 
                 // 发送初始命令来获取提示符
-                sessionWriter?.write("echo 'TERMINAL_READY'\n")
-                sessionWriter?.flush()
+                sessionWriter.write("echo 'TERMINAL_READY'\n")
+                sessionWriter.flush()
 
                 // Coroutine to continuously read from stdout
-                launch {
-                    terminalSession?.stdout?.bufferedReader()?.use { reader ->
-                        val buffer = CharArray(4096)
-                        var bytesRead: Int
-                        val lineBuilder = StringBuilder()
+                val readJob = launch {
+                    try {
+                        terminalSession.stdout.bufferedReader().use { reader ->
+                            val buffer = CharArray(4096)
+                            var bytesRead: Int
+                            val lineBuilder = StringBuilder()
 
-                        while (reader.read(buffer).also { bytesRead = it } != -1) {
-                            val chunk = String(buffer, 0, bytesRead)
-                            lineBuilder.append(chunk)
+                            while (reader.read(buffer).also { bytesRead = it } != -1) {
+                                val chunk = String(buffer, 0, bytesRead)
+                                lineBuilder.append(chunk)
 
-                            // 同时处理换行符和回车符
-                            while (true) {
-                                val newlineIndex = lineBuilder.indexOf('\n')
-                                val carriageReturnIndex = lineBuilder.indexOf('\r')
+                                // 同时处理换行符和回车符
+                                while (true) {
+                                    val newlineIndex = lineBuilder.indexOf('\n')
+                                    val carriageReturnIndex = lineBuilder.indexOf('\r')
 
-                                val firstIndex = when {
-                                    newlineIndex != -1 && carriageReturnIndex != -1 -> minOf(newlineIndex, carriageReturnIndex)
-                                    newlineIndex != -1 -> newlineIndex
-                                    carriageReturnIndex != -1 -> carriageReturnIndex
-                                    else -> -1
-                                }
+                                    val firstIndex = when {
+                                        newlineIndex != -1 && carriageReturnIndex != -1 -> minOf(newlineIndex, carriageReturnIndex)
+                                        newlineIndex != -1 -> newlineIndex
+                                        carriageReturnIndex != -1 -> carriageReturnIndex
+                                        else -> -1
+                                    }
 
-                                if (firstIndex == -1) {
-                                    break // No more separators
-                                }
+                                    if (firstIndex == -1) {
+                                        break // No more separators
+                                    }
 
-                                val line = lineBuilder.substring(0, firstIndex)
-                                val separator = lineBuilder[firstIndex]
+                                    val line = lineBuilder.substring(0, firstIndex)
+                                    val separator = lineBuilder[firstIndex]
 
-                                if (separator == '\n') {
-                                    Log.d("TerminalViewModel", "Full line read (NL): '$line'")
-                                    processOutput(line)
-                                    lineBuilder.delete(0, firstIndex + 1)
-                                } else { // separator == '\r'
-                                    // Check for \r\n sequence
-                                    if (firstIndex + 1 < lineBuilder.length && lineBuilder[firstIndex + 1] == '\n') {
-                                        Log.d("TerminalViewModel", "Full line read (CRLF): '$line'")
-                                        processOutput(line)
-                                        lineBuilder.delete(0, firstIndex + 2) // Consume both \r and \n
-                                    } else {
-                                        Log.d("TerminalViewModel", "Progress line read (CR): '$line'")
-                                        processProgressOutput(line)
+                                    if (separator == '\n') {
+                                        Log.d("TerminalViewModel", "Full line read (NL): '$line'")
+                                        processOutput(sessionId, line)
                                         lineBuilder.delete(0, firstIndex + 1)
+                                    } else { // separator == '\r'
+                                        // Check for \r\n sequence
+                                        if (firstIndex + 1 < lineBuilder.length && lineBuilder[firstIndex + 1] == '\n') {
+                                            Log.d("TerminalViewModel", "Full line read (CRLF): '$line'")
+                                            processOutput(sessionId, line)
+                                            lineBuilder.delete(0, firstIndex + 2) // Consume both \r and \n
+                                        } else {
+                                            Log.d("TerminalViewModel", "Progress line read (CR): '$line'")
+                                            processProgressOutput(sessionId, line)
+                                            lineBuilder.delete(0, firstIndex + 1)
+                                        }
+                                    }
+                                }
+
+                                // 检查剩余部分是否是提示符
+                                val remaining = lineBuilder.toString()
+                                if (remaining.isNotEmpty()) {
+                                    val cleanRemaining = stripAnsi(remaining)
+                                    if (isPrompt(cleanRemaining) || isInteractivePrompt(cleanRemaining)) {
+                                        Log.d("TerminalViewModel", "Partial line (prompt or interactive) read: '$remaining'")
+                                        processOutput(sessionId, remaining)
+                                        lineBuilder.clear()
                                     }
                                 }
                             }
 
-                            // 检查剩余部分是否是提示符
+                            // 处理缓冲区中剩余的内容
                             val remaining = lineBuilder.toString()
                             if (remaining.isNotEmpty()) {
-                                val cleanRemaining = stripAnsi(remaining)
-                                if (isPrompt(cleanRemaining) || isInteractivePrompt(cleanRemaining)) {
-                                    Log.d("TerminalViewModel", "Partial line (prompt or interactive) read: '$remaining'")
-                                    processOutput(remaining)
-                                    lineBuilder.clear()
-                                }
+                                Log.d("TerminalViewModel", "Final remaining content: '$remaining'")
+                                processOutput(sessionId, remaining)
                             }
                         }
-                        
-                        // 处理缓冲区中剩余的内容
-                        val remaining = lineBuilder.toString()
-                        if (remaining.isNotEmpty()) {
-                            Log.d("TerminalViewModel", "Final remaining content: '$remaining'")
-                            processOutput(remaining)
-                        }
+                    } catch (e: java.io.InterruptedIOException) {
+                        // This is expected when the job is cancelled, e.g., when closing a session.
+                        Log.i("TerminalViewModel", "Read job interrupted for session $sessionId.")
+                    } catch (e: Exception) {
+                        Log.e("TerminalViewModel", "Error in read job for session $sessionId", e)
+                        appendOutputToHistory(sessionId, "Error reading from terminal: ${e.message}")
                     }
+                }
+                
+                // 更新会话信息，包括readJob引用
+                updateSession(sessionId) { session ->
+                    session.copy(
+                        terminalSession = terminalSession,
+                        sessionWriter = sessionWriter,
+                        isInitializing = false,
+                        readJob = readJob
+                    )
                 }
             } catch (e: Exception) {
                 Log.e("TerminalViewModel", "Error starting session", e)
-                // _terminalOutput.value += "Error starting terminal session: ${e.message}\n"
-                appendOutputToHistory("Error starting terminal session: ${e.message}")
+                appendOutputToHistory(sessionId, "Error starting terminal session: ${e.message}")
             }
         }
     }
@@ -170,18 +282,22 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 Regex("root@[a-zA-Z0-9.\\-]+:\\s?~?/?.*#\\s*$").matches(trimmed)
     }
 
-    private fun handlePrompt(line: String): Boolean {
+    private fun handlePrompt(sessionId: String, line: String): Boolean {
+        val currentSession = _sessions.value.find { it.id == sessionId } ?: return false
+        
         val cwdPromptRegex = Regex("<cwd>(.*)</cwd>.*[#$]")
         val match = cwdPromptRegex.find(line)
 
         val isAPrompt = if (match != null) {
             val path = match.groups[1]?.value?.trim() ?: "~"
-            _currentDirectory.value = "$path $"
+            updateSession(sessionId) { session ->
+                session.copy(currentDirectory = "$path $")
+            }
             Log.d("TerminalViewModel", "Matched CWD prompt. Path: $path")
 
             val outputBeforePrompt = line.substring(0, match.range.first)
             if (outputBeforePrompt.isNotBlank()) {
-                currentCommandOutputBuilder.append(outputBeforePrompt)
+                currentSession.currentCommandOutputBuilder.append(outputBeforePrompt)
             }
             true
         } else {
@@ -197,7 +313,9 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 val regex = Regex(""".*:\s*(~?/?.*)\s*[#$]$""")
                 val matchResult = regex.find(trimmed)
                 val cleanPrompt = matchResult?.groups?.get(1)?.value?.trim() ?: trimmed
-                _currentDirectory.value = "${cleanPrompt} $"
+                updateSession(sessionId) { session ->
+                    session.copy(currentDirectory = "${cleanPrompt} $")
+                }
                 Log.d("TerminalViewModel", "Matched fallback prompt: $cleanPrompt")
                 true
             } else {
@@ -206,24 +324,28 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
 
         if (isAPrompt) {
-            if (isWaitingForInteractiveInput) {
-                isWaitingForInteractiveInput = false
-                lastInteractivePrompt = ""
-                _isInteractiveMode.value = false
-                _interactivePrompt.value = ""
-                Log.d("TerminalViewModel", "Interactive input session ended")
+            updateSession(sessionId) { session ->
+                session.copy(
+                    isWaitingForInteractiveInput = false,
+                    lastInteractivePrompt = "",
+                    isInteractiveMode = false,
+                    interactivePrompt = ""
+                )
             }
 
-            val lastExecutingIndex = _commandHistory.value.indexOfLast { it.isExecuting }
+            val sessionCommandHistory = currentSession.commandHistory
+            val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
             if (lastExecutingIndex != -1) {
-                val updatedHistory = _commandHistory.value.toMutableList()
+                val updatedHistory = sessionCommandHistory.toMutableList()
                 val oldItem = updatedHistory[lastExecutingIndex]
                 updatedHistory[lastExecutingIndex] = oldItem.copy(
-                    output = currentCommandOutputBuilder.toString().trim(),
+                    output = currentSession.currentCommandOutputBuilder.toString().trim(),
                     isExecuting = false
                 )
-                _commandHistory.value = updatedHistory
-                currentCommandOutputBuilder.clear()
+                updateSession(sessionId) { session ->
+                    session.copy(commandHistory = updatedHistory)
+                }
+                currentSession.currentCommandOutputBuilder.clear()
             }
             return true
         }
@@ -259,9 +381,10 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    private fun processOutput(line: String) {
+    private fun processOutput(sessionId: String, line: String) {
         Log.d("TerminalViewModel", "Received line: $line")
 
+        val currentSession = _sessions.value.find { it.id == sessionId } ?: return
         val cleanLine = stripAnsi(line)
         
         // 跳过TERMINAL_READY信号
@@ -270,10 +393,11 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
         
         // 检测命令回显
-        val lastExecutingIndex = _commandHistory.value.indexOfLast { it.isExecuting }
+        val sessionCommandHistory = currentSession.commandHistory
+        val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
         if (lastExecutingIndex != -1) {
-            val executingItem = _commandHistory.value[lastExecutingIndex]
-            if (currentCommandOutputBuilder.isEmpty() && cleanLine.trim() == executingItem.command.trim()) {
+            val executingItem = sessionCommandHistory[lastExecutingIndex]
+            if (currentSession.currentCommandOutputBuilder.isEmpty() && cleanLine.trim() == executingItem.command.trim()) {
                 Log.d("TerminalViewModel", "Ignoring command echo: '$cleanLine'")
                 return
             }
@@ -282,58 +406,67 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         // 检测交互式提示符
         if (isInteractivePrompt(cleanLine)) {
             Log.d("TerminalViewModel", "Detected interactive prompt: $cleanLine")
-            isWaitingForInteractiveInput = true
-            lastInteractivePrompt = cleanLine
-            _isInteractiveMode.value = true
-            _interactivePrompt.value = cleanLine
+            updateSession(sessionId) { session ->
+                session.copy(
+                    isWaitingForInteractiveInput = true,
+                    lastInteractivePrompt = cleanLine,
+                    isInteractiveMode = true,
+                    interactivePrompt = cleanLine
+                )
+            }
             
             // 将交互式提示添加到当前命令的输出中
             if (cleanLine.isNotBlank()) {
-                currentCommandOutputBuilder.appendLine(cleanLine)
+                currentSession.currentCommandOutputBuilder.appendLine(cleanLine)
                 
                 // 更新当前执行命令的输出
-                val lastExecutingIndex = _commandHistory.value.indexOfLast { it.isExecuting }
+                val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
                 if (lastExecutingIndex != -1) {
-                    val updatedHistory = _commandHistory.value.toMutableList()
+                    val updatedHistory = sessionCommandHistory.toMutableList()
                     val oldItem = updatedHistory[lastExecutingIndex]
                     updatedHistory[lastExecutingIndex] = oldItem.copy(
-                        output = currentCommandOutputBuilder.toString().trim()
+                        output = currentSession.currentCommandOutputBuilder.toString().trim()
                     )
-                    _commandHistory.value = updatedHistory
+                    updateSession(sessionId) { session ->
+                        session.copy(commandHistory = updatedHistory)
+                    }
                 } else {
-                    appendOutputToHistory(cleanLine)
+                    appendOutputToHistory(sessionId, cleanLine)
                 }
             }
             return
         }
         
-        if (handlePrompt(cleanLine)) {
+        if (handlePrompt(sessionId, cleanLine)) {
             return
         }
 
         // 处理命令输出
         if (cleanLine.isNotBlank()) {
-            currentCommandOutputBuilder.appendLine(cleanLine)
+            currentSession.currentCommandOutputBuilder.appendLine(cleanLine)
             
             // 更新当前执行命令的输出
-            val lastExecutingIndex = _commandHistory.value.indexOfLast { it.isExecuting }
+            val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
             if (lastExecutingIndex != -1) {
-                val updatedHistory = _commandHistory.value.toMutableList()
+                val updatedHistory = sessionCommandHistory.toMutableList()
                 val oldItem = updatedHistory[lastExecutingIndex]
                 updatedHistory[lastExecutingIndex] = oldItem.copy(
-                    output = currentCommandOutputBuilder.toString().trim()
+                    output = currentSession.currentCommandOutputBuilder.toString().trim()
                 )
-                _commandHistory.value = updatedHistory
+                updateSession(sessionId) { session ->
+                    session.copy(commandHistory = updatedHistory)
+                }
             } else {
                 // 没有执行中的命令，这是系统输出
-                appendOutputToHistory(cleanLine)
+                appendOutputToHistory(sessionId, cleanLine)
             }
         }
     }
     
-    private fun processProgressOutput(line: String) {
+    private fun processProgressOutput(sessionId: String, line: String) {
         Log.d("TerminalViewModel", "Processing progress output: '$line'")
         
+        val currentSession = _sessions.value.find { it.id == sessionId } ?: return
         val cleanLine = stripAnsi(line)
         
         // 跳过空行
@@ -342,11 +475,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
         
         // 检测命令回显
-        val lastExecutingIndex = _commandHistory.value.indexOfLast { it.isExecuting }
+        val sessionCommandHistory = currentSession.commandHistory
+        val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
         if (lastExecutingIndex != -1) {
-            val executingItem = _commandHistory.value[lastExecutingIndex]
+            val executingItem = sessionCommandHistory[lastExecutingIndex]
             // 检查整个 builder 而不是单个行，因为进度输出是累积的
-            if (currentCommandOutputBuilder.toString().trim() == executingItem.command.trim()) {
+            if (currentSession.currentCommandOutputBuilder.toString().trim() == executingItem.command.trim()) {
                 Log.d("TerminalViewModel", "Ignoring progress command echo: '$cleanLine'")
                 return
             }
@@ -357,23 +491,26 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             Log.d("TerminalViewModel", "Detected prompt in progress output: $cleanLine")
             if (lastExecutingIndex != -1) {
                 // 标记命令为完成状态
-                val updatedHistory = _commandHistory.value.toMutableList()
+                val updatedHistory = sessionCommandHistory.toMutableList()
                 val oldItem = updatedHistory[lastExecutingIndex]
                 updatedHistory[lastExecutingIndex] = oldItem.copy(
-                    output = currentCommandOutputBuilder.toString().trim(),
+                    output = currentSession.currentCommandOutputBuilder.toString().trim(),
                     isExecuting = false
                 )
-                _commandHistory.value = updatedHistory
-                currentCommandOutputBuilder.clear()
+                updateSession(sessionId) { session ->
+                    session.copy(
+                        commandHistory = updatedHistory,
+                        currentDirectory = cleanLine
+                    )
+                }
+                currentSession.currentCommandOutputBuilder.clear()
             }
-            // 更新提示符
-            _currentDirectory.value = cleanLine
             return
         }
 
         // 更新当前执行命令的输出，替换最后一行而不是添加新行
         if (lastExecutingIndex != -1) {
-            val updatedHistory = _commandHistory.value.toMutableList()
+            val updatedHistory = sessionCommandHistory.toMutableList()
             val oldItem = updatedHistory[lastExecutingIndex]
             
             val existingOutput = oldItem.output
@@ -394,26 +531,28 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             updatedHistory[lastExecutingIndex] = oldItem.copy(
                 output = lines.joinToString("\n")
             )
-            _commandHistory.value = updatedHistory
+            updateSession(sessionId) { session ->
+                session.copy(commandHistory = updatedHistory)
+            }
             
             // 也更新StringBuilder
             if (isProgressLine(cleanLine)) {
                 // 替换StringBuilder的最后一行
-                val builderContent = currentCommandOutputBuilder.toString()
+                val builderContent = currentSession.currentCommandOutputBuilder.toString()
                 val builderLines = builderContent.split('\n').toMutableList()
                 if (builderLines.isNotEmpty()) {
                     builderLines[builderLines.size - 1] = cleanLine
-                    currentCommandOutputBuilder.clear()
-                    currentCommandOutputBuilder.append(builderLines.joinToString("\n"))
+                    currentSession.currentCommandOutputBuilder.clear()
+                    currentSession.currentCommandOutputBuilder.append(builderLines.joinToString("\n"))
                 } else {
-                    currentCommandOutputBuilder.append(cleanLine)
+                    currentSession.currentCommandOutputBuilder.append(cleanLine)
                 }
             } else {
-                currentCommandOutputBuilder.appendLine(cleanLine)
+                currentSession.currentCommandOutputBuilder.appendLine(cleanLine)
             }
         } else {
             // 没有执行中的命令，直接添加到历史
-            appendProgressOutputToHistory(cleanLine)
+            appendProgressOutputToHistory(sessionId, cleanLine)
         }
     }
     
@@ -440,10 +579,13 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                cleanLine.contains("Installing")
     }
     
-    private fun appendProgressOutputToHistory(line: String) {
-        val currentHistory = _commandHistory.value
+    private fun appendProgressOutputToHistory(sessionId: String, line: String) {
+        val currentSession = _sessions.value.find { it.id == sessionId } ?: return
+        val currentHistory = currentSession.commandHistory
         if (currentHistory.isEmpty()) {
-            _commandHistory.value = listOf(CommandHistoryItem("", "", line, false))
+            updateSession(sessionId) { session ->
+                session.copy(commandHistory = listOf(CommandHistoryItem("", "", line, false)))
+            }
         } else {
             val lastItem = currentHistory.last()
             val updatedHistory = currentHistory.toMutableList()
@@ -465,69 +607,90 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             updatedHistory[currentHistory.size - 1] = lastItem.copy(
                 output = lines.joinToString("\n")
             )
-            _commandHistory.value = updatedHistory
+            updateSession(sessionId) { session ->
+                session.copy(commandHistory = updatedHistory)
+            }
         }
     }
     
-    private fun appendOutputToHistory(line: String) {
-        val currentHistory = _commandHistory.value
+    private fun appendOutputToHistory(sessionId: String, line: String) {
+        val currentSession = _sessions.value.find { it.id == sessionId } ?: return
+        val currentHistory = currentSession.commandHistory
         if (currentHistory.isEmpty()) {
-             _commandHistory.value = listOf(CommandHistoryItem("", "", line, false))
+            updateSession(sessionId) { session ->
+                session.copy(commandHistory = listOf(CommandHistoryItem("", "", line, false)))
+            }
         } else {
             val lastItem = currentHistory.last()
             val updatedHistory = currentHistory.toMutableList()
             updatedHistory[currentHistory.size - 1] = lastItem.copy(
                 output = if (lastItem.output.isEmpty()) line else lastItem.output + "\n" + line
             )
-            _commandHistory.value = updatedHistory
+            updateSession(sessionId) { session ->
+                session.copy(commandHistory = updatedHistory)
+            }
         }
     }
     
     fun sendCommand(command: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                if (isWaitingForInteractiveInput) {
+                val currentSession = getCurrentSession()
+                if (currentSession?.isWaitingForInteractiveInput == true) {
                     // 交互模式：直接发送输入，不添加到命令历史
                     Log.d("TerminalViewModel", "Sending interactive input: $command")
-                    sessionWriter?.write(command + "\n")
-                    sessionWriter?.flush()
+                    currentSession.sessionWriter?.write(command + "\n")
+                    currentSession.sessionWriter?.flush()
                     
                     // 将用户的输入添加到当前命令的输出中
-                    currentCommandOutputBuilder.appendLine(command)
-                    val lastExecutingIndex = _commandHistory.value.indexOfLast { it.isExecuting }
+                    currentSession.currentCommandOutputBuilder.appendLine(command)
+                    val sessionCommandHistory = currentSession.commandHistory
+                    val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
                     if (lastExecutingIndex != -1) {
-                        val updatedHistory = _commandHistory.value.toMutableList()
+                        val updatedHistory = sessionCommandHistory.toMutableList()
                         val oldItem = updatedHistory[lastExecutingIndex]
                         updatedHistory[lastExecutingIndex] = oldItem.copy(
-                            output = currentCommandOutputBuilder.toString().trim()
+                            output = currentSession.currentCommandOutputBuilder.toString().trim()
                         )
-                        _commandHistory.value = updatedHistory
+                        updateSession(currentSession.id) { session ->
+                            session.copy(commandHistory = updatedHistory)
+                        }
                     }
                     
                     // 重置交互状态（某些程序可能需要多次交互）
-                    isWaitingForInteractiveInput = false
-                    lastInteractivePrompt = ""
-                    _isInteractiveMode.value = false
-                    _interactivePrompt.value = ""
+                    updateSession(currentSession.id) { session ->
+                        session.copy(
+                            isWaitingForInteractiveInput = false,
+                            lastInteractivePrompt = "",
+                            isInteractiveMode = false,
+                            interactivePrompt = ""
+                        )
+                    }
                 } else {
                     // 普通命令模式
-                    currentCommandOutputBuilder.clear()
+                    currentSession?.currentCommandOutputBuilder?.clear()
                     
                     val newCommandItem = CommandHistoryItem(
-                        prompt = _currentDirectory.value,
+                        prompt = currentSession?.currentDirectory ?: "$ ",
                         command = command,
                         output = "",
                         isExecuting = true
                     )
-                    _commandHistory.value = _commandHistory.value + newCommandItem
                     
-                    sessionWriter?.write(command + "\n")
-                    sessionWriter?.flush()
+                    if (currentSession != null) {
+                        updateSession(currentSession.id) { session ->
+                            session.copy(commandHistory = session.commandHistory + newCommandItem)
+                        }
+                    }
+                    
+                    currentSession?.sessionWriter?.write(command + "\n")
+                    currentSession?.sessionWriter?.flush()
                     Log.d("TerminalViewModel", "Sent command: $command")
                 }
             } catch (e: Exception) {
                 Log.e("TerminalViewModel", "Error sending command", e)
-                appendOutputToHistory("Error sending command: ${e.message}")
+                val currentSession = getCurrentSession()
+                appendOutputToHistory(currentSession?.id ?: "N/A", "Error sending command: ${e.message}")
             }
         }
     }
@@ -535,8 +698,13 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     override fun onCleared() {
         super.onCleared()
         try {
-            sessionWriter?.close()
-            terminalSession?.process?.destroy()
+            _sessions.value.forEach { session ->
+                // 首先取消读取协程
+                session.readJob?.cancel()
+                // 然后关闭流和进程
+                session.sessionWriter?.close()
+                session.terminalSession?.process?.destroy()
+            }
         } catch (e: Exception) {
             Log.e("TerminalViewModel", "Error during cleanup", e)
         }
