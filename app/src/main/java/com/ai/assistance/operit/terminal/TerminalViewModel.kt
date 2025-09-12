@@ -21,6 +21,13 @@ data class CommandHistoryItem(
     val isExecuting: Boolean = false
 )
 
+enum class SessionInitState {
+    INITIALIZING,
+    LOGGED_IN,
+    AWAITING_FIRST_PROMPT,
+    READY
+}
+
 // 单个终端会话的数据类
 data class TerminalSessionData(
     val id: String = UUID.randomUUID().toString(),
@@ -35,6 +42,7 @@ data class TerminalSessionData(
     val isInteractiveMode: Boolean = false,
     val interactivePrompt: String = "",
     val isInitializing: Boolean = true,
+    val initState: SessionInitState = SessionInitState.INITIALIZING,
     val readJob: Job? = null  // 添加读取协程的Job引用
 )
 
@@ -385,9 +393,67 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         Log.d("TerminalViewModel", "Received line: $line")
 
         val currentSession = _sessions.value.find { it.id == sessionId } ?: return
+
+        when (currentSession.initState) {
+            SessionInitState.INITIALIZING -> {
+                if (line.contains("LOGIN_SUCCESSFUL")) {
+                    Log.d("TerminalViewModel", "Login successful marker found.")
+                    updateSession(sessionId) { session ->
+                        val welcomeHistoryItem = CommandHistoryItem(
+                            prompt = "",
+                            command = "",
+                            output = """
+  ___                   _ _   
+ / _ \ _ __   ___ _ __ (_) |_ 
+| | | | '_ \ / _ \ '__ | | __|
+| |_| | |_) |  __/ |   | | |_
+ \___/| .__/ \___|_|   |_|\__|
+      |_|                    
+
+  >> Your portable Ubuntu environment on Android <<
+""".trimIndent(),
+                            isExecuting = false
+                        )
+                        session.copy(
+                            initState = SessionInitState.LOGGED_IN,
+                            commandHistory = listOf(welcomeHistoryItem),
+                            currentCommandOutputBuilder = StringBuilder()
+                        )
+                    }
+                }
+                // 在此状态下丢弃所有输出
+                return
+            }
+            SessionInitState.LOGGED_IN -> {
+                // 等待 TERMINAL_READY 信号，这是我们自己发送的命令的输出
+                if (stripAnsi(line).trim() == "TERMINAL_READY") {
+                    Log.d("TerminalViewModel", "TERMINAL_READY marker found.")
+                    updateSession(sessionId) { session ->
+                        session.copy(initState = SessionInitState.AWAITING_FIRST_PROMPT)
+                    }
+                }
+                // 在此状态下丢弃所有输出，包括命令回显、命令输出本身
+                return
+            }
+            SessionInitState.AWAITING_FIRST_PROMPT -> {
+                val cleanLine = stripAnsi(line)
+                if (handlePrompt(sessionId, cleanLine)) {
+                    Log.d("TerminalViewModel", "First prompt detected. Session is now ready.")
+                    updateSession(sessionId) { session ->
+                        session.copy(initState = SessionInitState.READY)
+                    }
+                }
+                // 在检测到第一个提示符之前，丢弃所有输出（包括提示符本身）
+                return
+            }
+            SessionInitState.READY -> {
+                // 继续正常处理
+            }
+        }
+
         val cleanLine = stripAnsi(line)
         
-        // 跳过TERMINAL_READY信号
+        // 跳过TERMINAL_READY信号 (为了保险，在READY状态也检查一次)
         if (cleanLine.trim() == "TERMINAL_READY") {
             return
         }
@@ -467,6 +533,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         Log.d("TerminalViewModel", "Processing progress output: '$line'")
         
         val currentSession = _sessions.value.find { it.id == sessionId } ?: return
+        
+        if (currentSession.initState != SessionInitState.READY) {
+            // 在会话完全准备好之前，丢弃所有进度输出
+            return
+        }
+        
         val cleanLine = stripAnsi(line)
         
         // 跳过空行
@@ -667,6 +739,26 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                         )
                     }
                 } else {
+                    // 检查是否是clear命令
+                    if (command.trim() == "clear") {
+                        // 特殊处理clear命令：保留欢迎信息，清空其他历史
+                        val welcomeItem = currentSession?.commandHistory?.firstOrNull { 
+                            it.prompt.isEmpty() && it.command.isEmpty() && it.output.contains("Operit")
+                        }
+                        
+                        if (welcomeItem != null && currentSession != null) {
+                            updateSession(currentSession.id) { session ->
+                                session.copy(commandHistory = listOf(welcomeItem))
+                            }
+                        }
+                        
+                        // 发送clear命令到终端
+                        currentSession?.sessionWriter?.write(command + "\n")
+                        currentSession?.sessionWriter?.flush()
+                        Log.d("TerminalViewModel", "Sent clear command: $command")
+                        return@launch
+                    }
+                    
                     // 普通命令模式
                     currentSession?.currentCommandOutputBuilder?.clear()
                     

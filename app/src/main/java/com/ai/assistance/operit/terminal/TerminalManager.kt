@@ -342,7 +342,7 @@ class TerminalManager(private val context: Context) {
         
         val loginUbuntu = """
         login_ubuntu(){
-          exec ${'$'}BIN/bash ${'$'}BIN/proot-distro login --bind /storage/emulated/0:/sdcard/ ubuntu --isolated -- /bin/bash -il
+          exec ${'$'}BIN/bash ${'$'}BIN/proot-distro login --bind /storage/emulated/0:/sdcard/ ubuntu --isolated -- /bin/bash -c "echo LOGIN_SUCCESSFUL; exec /bin/bash -il"
         }
         """.trimIndent()
 
