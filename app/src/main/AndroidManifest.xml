@@ -33,7 +33,7 @@
 
         <service
             android:name=".service.TerminalService"
-            android:exported="false"/>
+            android:exported="true"/>
 
     </application>
 
