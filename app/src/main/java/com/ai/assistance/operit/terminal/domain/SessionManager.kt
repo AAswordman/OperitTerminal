@@ -1,6 +1,7 @@
 package com.ai.assistance.operit.terminal.domain
 
 import android.util.Log
+import com.ai.assistance.operit.terminal.TerminalManager
 import com.ai.assistance.operit.terminal.data.SessionInitState
 import com.ai.assistance.operit.terminal.data.TerminalSessionData
 import com.ai.assistance.operit.terminal.data.TerminalState
@@ -12,7 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * 终端会话管理器
  * 负责管理多个终端会话的生命周期
  */
-class SessionManager {
+class SessionManager(private val terminalManager: TerminalManager) {
     
     private val _state = MutableStateFlow(TerminalState())
     val state: StateFlow<TerminalState> = _state.asStateFlow()
@@ -24,14 +25,14 @@ class SessionManager {
         val currentState = _state.value
         val sessionCount = currentState.sessions.size + 1
         val newSession = TerminalSessionData(
-            title = "Ubuntu $sessionCount",
-            commandHistory = listOf(
+            title = "Ubuntu $sessionCount"
+        )
+        newSession.commandHistory.add(
                 com.ai.assistance.operit.terminal.data.CommandHistoryItem(
                     prompt = "",
                     command = "Initializing environment...",
                     output = "",
                     isExecuting = false
-                )
             )
         )
         
@@ -69,7 +70,9 @@ class SessionManager {
         sessionToClose?.let { session ->
             try {
                 // 清理资源
-                cleanupSession(session)
+                session.readJob?.cancel()
+                session.sessionWriter?.close()
+                terminalManager.closeSession(session.id)
             } catch (e: Exception) {
                 Log.e("SessionManager", "Error cleaning up session", e)
             }
@@ -128,6 +131,7 @@ class SessionManager {
     /**
      * 清理会话资源
      */
+     /*
     private fun cleanupSession(session: TerminalSessionData) {
         // 首先取消读取协程
         session.readJob?.cancel()
@@ -136,6 +140,7 @@ class SessionManager {
         session.sessionWriter?.close()
         session.terminalSession?.process?.destroy()
     }
+    */
     
     /**
      * 清理所有会话
@@ -144,7 +149,7 @@ class SessionManager {
         val currentState = _state.value
         currentState.sessions.forEach { session ->
             try {
-                cleanupSession(session)
+                closeSession(session.id)
             } catch (e: Exception) {
                 Log.e("SessionManager", "Error cleaning up session ${session.id}", e)
             }

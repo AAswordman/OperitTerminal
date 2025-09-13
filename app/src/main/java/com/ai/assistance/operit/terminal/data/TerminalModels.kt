@@ -1,5 +1,10 @@
 package com.ai.assistance.operit.terminal.data
 
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import com.ai.assistance.operit.terminal.domain.AnsiParser
 import kotlinx.coroutines.Job
 import java.io.OutputStreamWriter
@@ -8,13 +13,34 @@ import java.util.UUID
 /**
  * 命令历史项数据类
  */
-data class CommandHistoryItem(
+class CommandHistoryItem(
     val id: String = UUID.randomUUID().toString(),
-    val prompt: String,
-    val command: String,
-    val output: String,
-    val isExecuting: Boolean = false
-)
+    prompt: String,
+    command: String,
+    output: String,
+    isExecuting: Boolean = false
+) {
+    var prompt by mutableStateOf(prompt)
+    var command by mutableStateOf(command)
+    var output by mutableStateOf(output)
+    val outputPages = mutableStateListOf<String>()
+    var isExecuting by mutableStateOf(isExecuting)
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as CommandHistoryItem
+        return id == other.id
+    }
+
+    override fun hashCode(): Int {
+        return id.hashCode()
+    }
+
+    override fun toString(): String {
+        return "CommandHistoryItem(id='$id', prompt='$prompt', command='$command', output='${output.take(20)}...', isExecuting=$isExecuting)"
+    }
+}
 
 /**
  * 会话初始化状态枚举
@@ -35,7 +61,7 @@ data class TerminalSessionData(
     val terminalSession: com.ai.assistance.operit.terminal.TerminalSession? = null,
     val sessionWriter: OutputStreamWriter? = null,
     val currentDirectory: String = "$ ",
-    val commandHistory: List<CommandHistoryItem> = emptyList(),
+    val commandHistory: SnapshotStateList<CommandHistoryItem> = mutableStateListOf(),
     @Transient val currentCommandOutputBuilder: StringBuilder = StringBuilder(),
     @Transient val rawBuffer: StringBuilder = StringBuilder(),
     val isWaitingForInteractiveInput: Boolean = false,
@@ -47,7 +73,9 @@ data class TerminalSessionData(
     val readJob: Job? = null,
     val isFullscreen: Boolean = false,
     val screenContent: String = "",
-    @Transient val ansiParser: AnsiParser = AnsiParser()
+    @Transient val ansiParser: AnsiParser = AnsiParser(),
+    @Transient var currentExecutingCommand: CommandHistoryItem? = null,
+    @Transient var currentOutputLineCount: Int = 0
 )
 
 /**

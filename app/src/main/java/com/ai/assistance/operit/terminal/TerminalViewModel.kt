@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
+import androidx.compose.runtime.snapshots.SnapshotStateList
 
 @RequiresApi(Build.VERSION_CODES.O)
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
@@ -29,7 +30,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     private val terminalManager = TerminalManager(application)
-    private val sessionManager = SessionManager()
+    private val sessionManager = SessionManager(terminalManager)
     private val outputProcessor = OutputProcessor()
     
     // 暴露会话管理器的状态
@@ -38,8 +39,9 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     // 为了向后兼容，提供单独的状态流
     val sessions = terminalState.map { it.sessions }
     val currentSessionId = terminalState.map { it.currentSessionId }
-    val commandHistory = terminalState.map { it.currentSession?.commandHistory ?: emptyList() }
-        .map(::applyLogLimits)
+    val commandHistory = terminalState.map { 
+        it.currentSession?.commandHistory ?: androidx.compose.runtime.snapshots.SnapshotStateList<CommandHistoryItem>()
+    }
     val currentDirectory = terminalState.map { it.currentSession?.currentDirectory ?: "$ " }
     val isInteractiveMode = terminalState.map { it.currentSession?.isInteractiveMode ?: false }
     val interactivePrompt = terminalState.map { it.currentSession?.interactivePrompt ?: "" }
@@ -80,7 +82,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     private fun startSession(sessionId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val terminalSession = terminalManager.startTerminalSession()
+                val terminalSession = terminalManager.startTerminalSession(sessionId)
                 val sessionWriter = terminalSession.stdin.writer()
                 
                 appendOutputToHistory(sessionId, "Session started.")
@@ -183,13 +185,13 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             it.prompt.isEmpty() && it.command.isEmpty() && it.output.contains("Operit")
         }
         
-        sessionManager.updateSession(session.id) {
-            it.copy(commandHistory = welcomeItem?.let { listOf(it) } ?: emptyList())
-        }
+        session.commandHistory.clear()
+        welcomeItem?.let { session.commandHistory.add(it) }
     }
     
     private fun handleRegularCommand(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
         session.currentCommandOutputBuilder.clear()
+        session.currentOutputLineCount = 0
         
         val newCommandItem = CommandHistoryItem(
             prompt = session.currentDirectory,
@@ -198,9 +200,9 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             isExecuting = true
         )
         
-        sessionManager.updateSession(session.id) {
-            it.copy(commandHistory = it.commandHistory + newCommandItem)
-        }
+        // Set the current executing command reference for efficient access
+        session.currentExecutingCommand = newCommandItem
+        session.commandHistory.add(newCommandItem)
     }
 
     fun sendInterruptSignal() {
@@ -220,37 +222,14 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
     
-    private fun updateCurrentCommandOutput(session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
-        val sessionCommandHistory = session.commandHistory
-        val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
-        if (lastExecutingIndex != -1) {
-            val updatedHistory = sessionCommandHistory.toMutableList()
-            val oldItem = updatedHistory[lastExecutingIndex]
-            updatedHistory[lastExecutingIndex] = oldItem.copy(
-                output = session.currentCommandOutputBuilder.toString().trim()
-            )
-            sessionManager.updateSession(session.id) { session ->
-                session.copy(commandHistory = updatedHistory)
-            }
-        }
-    }
-    
     private fun appendOutputToHistory(sessionId: String, line: String) {
         val session = sessionManager.getSession(sessionId) ?: return
         val currentHistory = session.commandHistory
         if (currentHistory.isEmpty()) {
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = listOf(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false)))
-            }
+            currentHistory.add(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false))
         } else {
             val lastItem = currentHistory.last()
-            val updatedHistory = currentHistory.toMutableList()
-            updatedHistory[currentHistory.size - 1] = lastItem.copy(
-                output = if (lastItem.output.isEmpty()) line else lastItem.output + "\n" + line
-            )
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = updatedHistory)
-            }
+            lastItem.output = if (lastItem.output.isEmpty()) line else lastItem.output + "\n" + line
         }
     }
     
@@ -270,7 +249,16 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             if (lines.size > MAX_OUTPUT_LINES_PER_ITEM) {
                 val truncatedOutput = "... (output truncated, showing last ${MAX_OUTPUT_LINES_PER_ITEM} lines) ...\n" +
                         lines.takeLast(MAX_OUTPUT_LINES_PER_ITEM).joinToString("\n")
-                item.copy(output = truncatedOutput)
+                
+                // Since CommandHistoryItem is now a class, we can't use copy()
+                // We will create a new item for the limited view model history
+                CommandHistoryItem(
+                    id = item.id,
+                    prompt = item.prompt,
+                    command = item.command,
+                    output = truncatedOutput,
+                    isExecuting = item.isExecuting
+                )
             } else {
                 item
             }
@@ -279,6 +267,6 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
-        sessionManager.cleanup()
+        terminalManager.cleanup()
     }
 } 

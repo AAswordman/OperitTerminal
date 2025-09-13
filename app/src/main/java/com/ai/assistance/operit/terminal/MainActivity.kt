@@ -20,6 +20,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import com.ai.assistance.operit.terminal.data.CommandHistoryItem
 
 class MainActivity : ComponentActivity() {
     @RequiresApi(Build.VERSION_CODES.O)
@@ -43,7 +45,7 @@ class MainActivity : ComponentActivity() {
                 val terminalViewModel: TerminalViewModel = viewModel()
                 val sessions by terminalViewModel.sessions.collectAsState(initial = emptyList())
                 val currentSessionId by terminalViewModel.currentSessionId.collectAsState(initial = null)
-                val commandHistory by terminalViewModel.commandHistory.collectAsState(initial = emptyList())
+                val commandHistory by terminalViewModel.commandHistory.collectAsState(initial = SnapshotStateList<CommandHistoryItem>())
                 val currentDirectory by terminalViewModel.currentDirectory.collectAsState(initial = "$ ")
                 var command by remember { mutableStateOf("") }
                 val isFullscreen by terminalViewModel.isFullscreen.collectAsState(initial = false)

@@ -18,6 +18,7 @@ import java.util.zip.ZipEntry
 import java.io.BufferedInputStream
 import java.io.FileInputStream
 import java.nio.file.Paths
+import java.util.concurrent.ConcurrentHashMap
 
 class TerminalManager(private val context: Context) {
 
@@ -25,6 +26,7 @@ class TerminalManager(private val context: Context) {
     private val usrDir: File = File(filesDir, "usr")
     private val binDir: File = File(usrDir, "bin")
     private val nativeLibDir: String = context.applicationInfo.nativeLibraryDir
+    private val activeSessions = ConcurrentHashMap<String, TerminalSession>()
 
     companion object {
         private const val TAG = "TerminalManager"
@@ -365,7 +367,7 @@ class TerminalManager(private val context: Context) {
         """.trimIndent()
     }
     
-    fun startTerminalSession(): TerminalSession {
+    fun startTerminalSession(sessionId: String): TerminalSession {
         val bash = File(binDir, "bash").absolutePath
         val startScript = "source \$HOME/common.sh && start_shell"
         
@@ -388,10 +390,27 @@ class TerminalManager(private val context: Context) {
 
         val pty = Pty.start(command, env, filesDir)
 
-        return TerminalSession(
+        val session = TerminalSession(
             process = pty.process,
             stdout = pty.stdout,
             stdin = pty.stdin
         )
+        activeSessions[sessionId] = session
+        return session
+    }
+
+    fun closeSession(sessionId: String) {
+        activeSessions[sessionId]?.let { session ->
+            session.process.destroy()
+            activeSessions.remove(sessionId)
+            Log.d(TAG, "Closed and removed session: $sessionId")
+        }
+    }
+
+    fun cleanup() {
+        activeSessions.keys.forEach { sessionId ->
+            closeSession(sessionId)
+        }
+        Log.d(TAG, "All active sessions cleaned up.")
     }
 } 

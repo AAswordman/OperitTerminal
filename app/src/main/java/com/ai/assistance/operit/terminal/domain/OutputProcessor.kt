@@ -6,15 +6,26 @@ import com.ai.assistance.operit.terminal.data.SessionInitState
 import com.ai.assistance.operit.terminal.data.TerminalSessionData
 
 /**
+ * 终端输出的会话处理状态
+ * @property justHandledCarriageReturn 如果最近处理的行分隔符是回车符（CR），则为 true
+ */
+private data class SessionProcessingState(
+    var justHandledCarriageReturn: Boolean = false
+)
+
+/**
  * 终端输出处理器
  * 负责处理和解析终端输出，更新会话状态
  */
 class OutputProcessor {
-    
+
+    private val sessionStates = mutableMapOf<String, SessionProcessingState>()
+
     companion object {
         private const val TAG = "OutputProcessor"
+        private const val MAX_LINES_PER_HISTORY_ITEM = 10
     }
-    
+
     /**
      * 处理终端输出
      */
@@ -40,7 +51,9 @@ class OutputProcessor {
             // Do not clear the raw buffer here, the parser needs the stream
             return
         }
-        
+
+        val state = sessionStates.getOrPut(sessionId) { SessionProcessingState() }
+
         // 从缓冲区中提取并处理行
         while (session.rawBuffer.isNotEmpty()) {
             val bufferContent = session.rawBuffer.toString()
@@ -50,20 +63,21 @@ class OutputProcessor {
             if (carriageReturnIndex != -1 && (newlineIndex == -1 || carriageReturnIndex < newlineIndex)) {
                 // We have a carriage return.
                 val line = bufferContent.substring(0, carriageReturnIndex)
-                
+
                 val isCRLF = carriageReturnIndex + 1 < bufferContent.length && bufferContent[carriageReturnIndex + 1] == '\n'
                 val consumedLength = if (isCRLF) carriageReturnIndex + 2 else carriageReturnIndex + 1
-                
+
                 session.rawBuffer.delete(0, consumedLength)
 
                 if (isCRLF) {
-                    // It's a CRLF, treat as a normal line.
+                    // It's a CRLF, treat as a normal line. `processLine` will handle the
+                    // case where this CRLF finalizes a progress-updated line.
                     Log.d(TAG, "Processing CRLF line: '$line'")
                     processLine(sessionId, line, sessionManager)
                 } else {
                     // It's just CR, treat as a progress update.
                     Log.d(TAG, "Processing CR line: '$line'")
-                    handleProgressLine(sessionId, line, sessionManager)
+                    handleCarriageReturn(sessionId, line, sessionManager)
                 }
             } else if (newlineIndex != -1) {
                 // We have a newline without a preceding carriage return.
@@ -85,17 +99,15 @@ class OutputProcessor {
         }
     }
 
-    private fun handleProgressLine(sessionId: String, line: String, sessionManager: SessionManager) {
+    private fun handleCarriageReturn(sessionId: String, line: String, sessionManager: SessionManager) {
         val cleanLine = stripAnsi(line)
-        if (cleanLine.isEmpty()) {
-            return
-        }
         val session = sessionManager.getSession(sessionId) ?: return
         if (session.initState != SessionInitState.READY) {
             processLine(sessionId, line, sessionManager)
             return
         }
         updateProgressOutput(sessionId, cleanLine, sessionManager)
+        sessionStates[sessionId]?.justHandledCarriageReturn = true
     }
 
     private fun processLine(
@@ -104,7 +116,7 @@ class OutputProcessor {
         sessionManager: SessionManager
     ) {
         val session = sessionManager.getSession(sessionId) ?: return
-        
+
         when (session.initState) {
             SessionInitState.INITIALIZING -> {
                 handleInitializingState(sessionId, line, sessionManager)
@@ -116,11 +128,42 @@ class OutputProcessor {
                 handleAwaitingFirstPromptState(sessionId, line, sessionManager)
             }
             SessionInitState.READY -> {
-                handleReadyState(sessionId, line, sessionManager)
+                val state = sessionStates.getOrPut(sessionId) { SessionProcessingState() }
+                if (state.justHandledCarriageReturn) {
+                    // A newline is received after a carriage return. This finalizes the line that was being updated.
+                    state.justHandledCarriageReturn = false // Reset state immediately
+
+                    val cleanLine = stripAnsi(line)
+
+                    // If the line following the CR is not empty, it means we need to overwrite the
+                    // current line's content before finalizing with a newline. This happens with
+                    // tools like 'wget' or 'curl' that print status on the same line.
+                    // e.g., "progress... 50%\rprogress... 100%\n"
+                    if (cleanLine.isNotEmpty()) {
+                        updateProgressOutput(sessionId, cleanLine, sessionManager)
+                    }
+
+                    // Always append a newline to finalize the line and move to the next.
+                    val currentItem = session.currentExecutingCommand
+                    if (currentItem != null) {
+                        session.currentCommandOutputBuilder.append('\n')
+                        currentItem.output = session.currentCommandOutputBuilder.toString()
+                    } else {
+                        val lastItem = session.commandHistory.lastOrNull()
+                        // Check if the last item is a pure output block and not empty
+                        lastItem?.let {
+                            if (!it.isExecuting && it.prompt.isBlank() && it.command.isBlank() && it.output.isNotEmpty()) {
+                                it.output += "\n"
+                            }
+                        }
+                    }
+                } else {
+                    handleReadyState(sessionId, line, sessionManager)
+                }
             }
         }
     }
-    
+
     private fun handleInitializingState(
         sessionId: String,
         line: String,
@@ -128,7 +171,7 @@ class OutputProcessor {
     ) {
         if (line.contains("LOGIN_SUCCESSFUL")) {
             Log.d(TAG, "Login successful marker found.")
-            sessionManager.updateSession(sessionId) { session ->
+            sessionManager.getSession(sessionId)?.let { session ->
                 val welcomeHistoryItem = CommandHistoryItem(
                     prompt = "",
                     command = "",
@@ -144,15 +187,16 @@ class OutputProcessor {
 """.trimIndent(),
                     isExecuting = false
                 )
-                session.copy(
-                    initState = SessionInitState.LOGGED_IN,
-                    commandHistory = listOf(welcomeHistoryItem),
-                    currentCommandOutputBuilder = StringBuilder()
-                )
+                session.commandHistory.clear()
+                session.commandHistory.add(welcomeHistoryItem)
+                session.currentCommandOutputBuilder.clear()
+                sessionManager.updateSession(sessionId) {
+                    it.copy(initState = SessionInitState.LOGGED_IN)
+                }
             }
         }
     }
-    
+
     private fun handleLoggedInState(
         sessionId: String,
         line: String,
@@ -165,7 +209,7 @@ class OutputProcessor {
             }
         }
     }
-    
+
     private fun handleAwaitingFirstPromptState(
         sessionId: String,
         line: String,
@@ -179,33 +223,33 @@ class OutputProcessor {
             }
         }
     }
-    
+
     private fun handleReadyState(
         sessionId: String,
         line: String,
         sessionManager: SessionManager
     ) {
         val cleanLine = stripAnsi(line)
-        
+
         // 跳过TERMINAL_READY信号
         if (cleanLine.trim() == "TERMINAL_READY") {
             return
         }
-        
+
         val session = sessionManager.getSession(sessionId) ?: return
-        
+
         // 检测命令回显
         if (isCommandEcho(cleanLine, session)) {
             Log.d(TAG, "Ignoring command echo: '$cleanLine'")
             return
         }
-        
+
         // 检测交互式提示符
         if (isInteractivePrompt(cleanLine)) {
             handleInteractivePrompt(sessionId, cleanLine, sessionManager)
             return
         }
-        
+
         // 处理提示符
         if (handlePrompt(sessionId, cleanLine, sessionManager)) {
             return
@@ -216,13 +260,13 @@ class OutputProcessor {
             updateScreenContent(sessionId, line, sessionManager)
             return
         }
-        
+
         // 处理普通输出
         if (cleanLine.isNotBlank()) {
             updateCommandOutput(sessionId, cleanLine, sessionManager)
         }
     }
-    
+
     /**
      * 检测是否是提示符
      */
@@ -240,7 +284,7 @@ class OutputProcessor {
                 Regex(".*@[a-zA-Z0-9.\\-]+\\s?:\\s?~?/?.*[#$]\\s*$").matches(trimmed) ||
                 Regex("root@[a-zA-Z0-9.\\-]+:\\s?~?/?.*#\\s*$").matches(trimmed)
     }
-    
+
     /**
      * 处理提示符
      */
@@ -250,7 +294,7 @@ class OutputProcessor {
         sessionManager: SessionManager
     ): Boolean {
         val session = sessionManager.getSession(sessionId) ?: return false
-        
+
         val cwdPromptRegex = Regex("<cwd>(.*)</cwd>.*[#$]")
         val match = cwdPromptRegex.find(line)
 
@@ -295,7 +339,7 @@ class OutputProcessor {
         }
         return false
     }
-    
+
     /**
      * 检测是否是交互式提示符
      */
@@ -314,12 +358,12 @@ class OutputProcessor {
             ".*press.*to continue.*",
             ".*\\[.*y.*n.*\\].*"
         )
-        
+
         return interactivePatterns.any { pattern ->
             cleanLine.matches(Regex(pattern))
         }
     }
-    
+
     private fun handleInteractivePrompt(
         sessionId: String,
         cleanLine: String,
@@ -334,100 +378,86 @@ class OutputProcessor {
                 interactivePrompt = cleanLine
             )
         }
-        
+
         // 将交互式提示添加到当前命令的输出中
         if (cleanLine.isNotBlank()) {
             updateCommandOutput(sessionId, cleanLine, sessionManager)
         }
     }
-    
+
     private fun isCommandEcho(cleanLine: String, session: TerminalSessionData): Boolean {
-        val sessionCommandHistory = session.commandHistory
-        val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
-        if (lastExecutingIndex != -1) {
-            val executingItem = sessionCommandHistory[lastExecutingIndex]
-            if (session.currentCommandOutputBuilder.isEmpty() && 
-                cleanLine.trim() == executingItem.command.trim()) {
+        val lastExecutingItem = session.currentExecutingCommand
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+            if (session.currentCommandOutputBuilder.isEmpty() &&
+                cleanLine.trim() == lastExecutingItem.command.trim()) {
                 return true
             }
         }
         return false
     }
-    
+
     private fun updateCommandOutput(
         sessionId: String,
         cleanLine: String,
         sessionManager: SessionManager
     ) {
         val session = sessionManager.getSession(sessionId) ?: return
-        val builder = session.currentCommandOutputBuilder
-        if (builder.isNotEmpty() && builder.last() != '\n') {
-            builder.append('\n')
-        }
-        builder.appendLine(cleanLine)
-        
-        val sessionCommandHistory = session.commandHistory
-        val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
-        
-        if (lastExecutingIndex != -1) {
-            val updatedHistory = sessionCommandHistory.toMutableList()
-            val oldItem = updatedHistory[lastExecutingIndex]
-            updatedHistory[lastExecutingIndex] = oldItem.copy(
-                output = session.currentCommandOutputBuilder.toString().trim()
-            )
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = updatedHistory)
+        val currentItem = session.currentExecutingCommand
+
+        if (currentItem != null && currentItem.isExecuting) {
+            val builder = session.currentCommandOutputBuilder
+            if (builder.isNotEmpty() && builder.last() != '\n') {
+                builder.append('\n')
+            }
+            builder.append(cleanLine)
+
+            // 实时更新当前输出块
+            currentItem.output = builder.toString()
+            session.currentOutputLineCount++
+
+            if (session.currentOutputLineCount >= MAX_LINES_PER_HISTORY_ITEM) {
+                // 当前页已满，将其添加到已完成的页面列表并开始新的一页
+                currentItem.outputPages.add(currentItem.output)
+                builder.clear()
+                session.currentOutputLineCount = 0
+                currentItem.output = "" // 为新页面清空实时输出
             }
         } else {
             // 没有执行中的命令，这是系统输出
             appendOutputToHistory(sessionId, cleanLine, sessionManager)
         }
     }
-    
+
     private fun updateProgressOutput(
         sessionId: String,
         cleanLine: String,
         sessionManager: SessionManager
     ) {
         val session = sessionManager.getSession(sessionId) ?: return
+        val builder = session.currentCommandOutputBuilder
 
-        // Progress updates should manipulate the currentCommandOutputBuilder
-        val builderContent = session.currentCommandOutputBuilder.toString()
-        val lines = if (builderContent.isEmpty()) {
-            mutableListOf()
+        // More efficient way to replace the last line
+        val lastNewlineIndex = builder.lastIndexOf('\n')
+        if (lastNewlineIndex != -1) {
+            // Found a newline, replace everything after it
+            builder.setLength(lastNewlineIndex + 1)
+            builder.append(cleanLine)
         } else {
-            builderContent.split('\n').toMutableList()
+            // No newline, replace the whole buffer
+            builder.clear()
+            builder.append(cleanLine)
         }
 
-        if (lines.isNotEmpty()) {
-            lines[lines.size - 1] = cleanLine
-        } else {
-            lines.add(cleanLine)
-        }
-        
-        session.currentCommandOutputBuilder.clear()
-        session.currentCommandOutputBuilder.append(lines.joinToString("\n"))
+        val lastExecutingItem = session.currentExecutingCommand
 
-        val sessionCommandHistory = session.commandHistory
-        val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
-        
-        if (lastExecutingIndex != -1) {
-            val updatedHistory = sessionCommandHistory.toMutableList()
-            val oldItem = updatedHistory[lastExecutingIndex]
-            
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
             // Update history from the builder
-            updatedHistory[lastExecutingIndex] = oldItem.copy(
-                output = session.currentCommandOutputBuilder.toString().trimEnd()
-            )
-
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = updatedHistory)
-            }
+            lastExecutingItem.output = builder.toString().trimEnd()
         } else {
             appendProgressOutputToHistory(sessionId, cleanLine, sessionManager)
         }
     }
-    
+
     private fun finishCurrentCommand(sessionId: String, sessionManager: SessionManager) {
         sessionManager.updateSession(sessionId) { session ->
             session.copy(
@@ -439,23 +469,18 @@ class OutputProcessor {
         }
 
         val session = sessionManager.getSession(sessionId) ?: return
-        val sessionCommandHistory = session.commandHistory
-        val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
-        
-        if (lastExecutingIndex != -1) {
-            val updatedHistory = sessionCommandHistory.toMutableList()
-            val oldItem = updatedHistory[lastExecutingIndex]
-            updatedHistory[lastExecutingIndex] = oldItem.copy(
-                output = session.currentCommandOutputBuilder.toString().trim(),
-                isExecuting = false
-            )
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = updatedHistory)
-            }
+        val lastExecutingItem = session.currentExecutingCommand
+
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+            lastExecutingItem.output = session.currentCommandOutputBuilder.toString().trim()
+            lastExecutingItem.isExecuting = false
+
+            // Clear the reference since command is no longer executing
+            session.currentExecutingCommand = null
             session.currentCommandOutputBuilder.clear()
         }
     }
-    
+
     private fun appendOutputToHistory(
         sessionId: String,
         line: String,
@@ -463,23 +488,25 @@ class OutputProcessor {
     ) {
         val session = sessionManager.getSession(sessionId) ?: return
         val currentHistory = session.commandHistory
-        
-        if (currentHistory.isEmpty()) {
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = listOf(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false)))
+
+        val lastItem = currentHistory.lastOrNull()
+
+        // 尝试追加到最后一项。如果 lastItem 不为 null 且是纯输出块，则追加。
+        val appended = lastItem?.let {
+            if (!it.isExecuting && it.prompt.isBlank() && it.command.isBlank()) {
+                it.output = if (it.output.isEmpty()) line else it.output + "\n" + line
+                true // 返回 true 表示追加成功
+            } else {
+                false // 不满足追加条件
             }
-        } else {
-            val lastItem = currentHistory.last()
-            val updatedHistory = currentHistory.toMutableList()
-            updatedHistory[currentHistory.size - 1] = lastItem.copy(
-                output = if (lastItem.output.isEmpty()) line else lastItem.output + "\n" + line
-            )
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = updatedHistory)
-            }
+        } ?: false // lastItem 为 null，无法追加
+
+        // 如果没有追加成功，则创建一个新的历史记录项
+        if (!appended) {
+            currentHistory.add(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false))
         }
     }
-    
+
     private fun appendProgressOutputToHistory(
         sessionId: String,
         line: String,
@@ -487,48 +514,40 @@ class OutputProcessor {
     ) {
         val session = sessionManager.getSession(sessionId) ?: return
         val currentHistory = session.commandHistory
-        
+
         if (currentHistory.isEmpty()) {
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = listOf(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false)))
-            }
+            currentHistory.add(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false))
         } else {
             val lastItem = currentHistory.last()
-            val updatedHistory = currentHistory.toMutableList()
-            
+
             val existingOutput = lastItem.output
             val lines = if (existingOutput.isEmpty()) {
                 mutableListOf(line)
             } else {
                 existingOutput.split('\n').toMutableList()
             }
-            
+
             if (lines.isNotEmpty()) {
                 lines[lines.size - 1] = line
             } else {
                 lines.add(line)
             }
-            
-            updatedHistory[currentHistory.size - 1] = lastItem.copy(
-                output = lines.joinToString("\n")
-            )
-            sessionManager.updateSession(sessionId) { session ->
-                session.copy(commandHistory = updatedHistory)
-            }
+
+            lastItem.output = lines.joinToString("\n")
         }
     }
-    
+
     private fun isProgressLine(line: String): Boolean {
         val cleanLine = line.trim()
-        return cleanLine.contains("%") || 
-               cleanLine.contains("█") || 
-               cleanLine.contains("▓") || 
-               cleanLine.contains("░") || 
-               cleanLine.contains("▌") || 
-               cleanLine.contains("▎") || 
-               cleanLine.contains("▍") || 
-               cleanLine.contains("▋") || 
-               cleanLine.contains("▊") || 
+        return cleanLine.contains("%") ||
+               cleanLine.contains("█") ||
+               cleanLine.contains("▓") ||
+               cleanLine.contains("░") ||
+               cleanLine.contains("▌") ||
+               cleanLine.contains("▎") ||
+               cleanLine.contains("▍") ||
+               cleanLine.contains("▋") ||
+               cleanLine.contains("▊") ||
                cleanLine.contains("▉") ||
                cleanLine.matches(Regex(".*\\d+/\\d+.*")) ||
                cleanLine.matches(Regex(".*\\[.*\\].*")) ||
@@ -539,7 +558,7 @@ class OutputProcessor {
                cleanLine.contains("Downloading") ||
                cleanLine.contains("Installing")
     }
-    
+
     /**
      * 去除ANSI转义序列
      */
@@ -565,10 +584,10 @@ class OutputProcessor {
         if (enterIndex != -1) {
             Log.d(TAG, "Entering fullscreen mode for session $sessionId")
             val remainingContent = bufferContent.substring(enterIndex + enterFullscreen.length)
-            
+
             sessionManager.updateSession(sessionId) { session ->
                 session.copy(
-                    isFullscreen = true, 
+                    isFullscreen = true,
                     screenContent = remainingContent // 将切换后的所有内容视为屏幕内容
                 )
             }
@@ -579,7 +598,7 @@ class OutputProcessor {
         if (exitIndex != -1) {
             Log.d(TAG, "Exiting fullscreen mode for session $sessionId")
             val outputBeforeExit = bufferContent.substring(0, exitIndex)
-            
+
             // 更新最后一个命令的输出
             if (outputBeforeExit.isNotEmpty()) {
                 updateCommandOutput(sessionId, outputBeforeExit, sessionManager)
@@ -588,7 +607,7 @@ class OutputProcessor {
             sessionManager.updateSession(sessionId) { session ->
                 session.copy(isFullscreen = false, screenContent = "")
             }
-            
+
             // 消耗包括退出代码在内的所有内容
             buffer.delete(0, exitIndex + exitFullscreen.length)
 
