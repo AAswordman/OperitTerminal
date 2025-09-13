@@ -24,6 +24,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     companion object {
         private const val TAG = "TerminalViewModel"
+        private const val MAX_HISTORY_ITEMS = 500
+        private const val MAX_OUTPUT_LINES_PER_ITEM = 1000
     }
 
     private val terminalManager = TerminalManager(application)
@@ -37,9 +39,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     val sessions = terminalState.map { it.sessions }
     val currentSessionId = terminalState.map { it.currentSessionId }
     val commandHistory = terminalState.map { it.currentSession?.commandHistory ?: emptyList() }
+        .map(::applyLogLimits)
     val currentDirectory = terminalState.map { it.currentSession?.currentDirectory ?: "$ " }
     val isInteractiveMode = terminalState.map { it.currentSession?.isInteractiveMode ?: false }
     val interactivePrompt = terminalState.map { it.currentSession?.interactivePrompt ?: "" }
+    val isFullscreen = terminalState.map { it.currentSession?.isFullscreen ?: false }
+    val screenContent = terminalState.map { it.currentSession?.screenContent ?: "" }
 
     init {
         // 创建第一个会话
@@ -90,66 +95,10 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                         terminalSession.stdout.bufferedReader().use { reader ->
                             val buffer = CharArray(4096)
                             var bytesRead: Int
-                            val lineBuilder = StringBuilder()
-
                             while (reader.read(buffer).also { bytesRead = it } != -1) {
                                 val chunk = String(buffer, 0, bytesRead)
-                                lineBuilder.append(chunk)
-
-                                // 处理换行符和回车符
-                                while (true) {
-                                    val newlineIndex = lineBuilder.indexOf('\n')
-                                    val carriageReturnIndex = lineBuilder.indexOf('\r')
-
-                                    val firstIndex = when {
-                                        newlineIndex != -1 && carriageReturnIndex != -1 -> minOf(newlineIndex, carriageReturnIndex)
-                                        newlineIndex != -1 -> newlineIndex
-                                        carriageReturnIndex != -1 -> carriageReturnIndex
-                                        else -> -1
-                                    }
-
-                                    if (firstIndex == -1) {
-                                        break // No more separators
-                                    }
-
-                                    val line = lineBuilder.substring(0, firstIndex)
-                                    val separator = lineBuilder[firstIndex]
-
-                                    if (separator == '\n') {
-                                        Log.d(TAG, "Full line read (NL): '$line'")
-                                        outputProcessor.processOutput(sessionId, line, sessionManager)
-                                        lineBuilder.delete(0, firstIndex + 1)
-                                    } else { // separator == '\r'
-                                        // Check for \r\n sequence
-                                        if (firstIndex + 1 < lineBuilder.length && lineBuilder[firstIndex + 1] == '\n') {
-                                            Log.d(TAG, "Full line read (CRLF): '$line'")
-                                            outputProcessor.processOutput(sessionId, line, sessionManager)
-                                            lineBuilder.delete(0, firstIndex + 2) // Consume both \r and \n
-                                        } else {
-                                            Log.d(TAG, "Progress line read (CR): '$line'")
-                                            outputProcessor.processProgressOutput(sessionId, line, sessionManager)
-                                            lineBuilder.delete(0, firstIndex + 1)
-                                        }
-                                    }
-                                }
-
-                                // 检查剩余部分是否是提示符
-                                val remaining = lineBuilder.toString()
-                                if (remaining.isNotEmpty()) {
-                                    val cleanRemaining = stripAnsi(remaining)
-                                    if (outputProcessor.isPrompt(cleanRemaining) || outputProcessor.isInteractivePrompt(cleanRemaining)) {
-                                        Log.d(TAG, "Partial line (prompt or interactive) read: '$remaining'")
-                                        outputProcessor.processOutput(sessionId, remaining, sessionManager)
-                                        lineBuilder.clear()
-                                    }
-                                }
-                            }
-
-                            // 处理缓冲区中剩余的内容
-                            val remaining = lineBuilder.toString()
-                            if (remaining.isNotEmpty()) {
-                                Log.d(TAG, "Final remaining content: '$remaining'")
-                                outputProcessor.processOutput(sessionId, remaining, sessionManager)
+                                Log.d(TAG, "Read chunk: '$chunk'")
+                                outputProcessor.processOutput(sessionId, chunk, sessionManager)
                             }
                         }
                     } catch (e: java.io.InterruptedIOException) {
@@ -177,85 +126,81 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
     
     fun sendCommand(command: String) {
+        // Wrapper for sending a command, which is just input with a newline.
+        sendInput(command, isCommand = true)
+    }
+
+    fun sendInput(input: String, isCommand: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
+            val session = sessionManager.getCurrentSession() ?: return@launch
+            
             try {
-                val currentSession = sessionManager.getCurrentSession()
-                if (currentSession?.isWaitingForInteractiveInput == true) {
-                    // 交互模式：直接发送输入，不添加到命令历史
-                    handleInteractiveInput(command, currentSession)
-                } else {
-                    // 普通命令模式
-                    if (command.trim() == "clear") {
-                        handleClearCommand(currentSession)
-                    } else {
-                        handleRegularCommand(command, currentSession)
-                    }
+                val fullInput = if (isCommand) "$input\n" else input
+                session.sessionWriter?.write(fullInput)
+                session.sessionWriter?.flush()
+                Log.d(TAG, "Sent input. isCommand=$isCommand, input='$fullInput'")
+
+                if (isCommand) {
+                    // Only commands are added to history and trigger state changes
+                    handleCommandLogic(input, session)
                 }
+
             } catch (e: Exception) {
-                Log.e(TAG, "Error sending command", e)
-                val currentSession = sessionManager.getCurrentSession()
-                appendOutputToHistory(currentSession?.id ?: "N/A", "Error sending command: ${e.message}")
+                Log.e(TAG, "Error sending input", e)
+                appendOutputToHistory(session.id, "Error sending input: ${e.message}")
             }
         }
     }
-    
-    private suspend fun handleInteractiveInput(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
-        Log.d(TAG, "Sending interactive input: $command")
-        session.sessionWriter?.write(command + "\n")
-        session.sessionWriter?.flush()
-        
-        // 将用户的输入添加到当前命令的输出中
-        session.currentCommandOutputBuilder.appendLine(command)
-        updateCurrentCommandOutput(session)
-        
-        // 重置交互状态
-        sessionManager.updateSession(session.id) { session ->
-                session.copy(
+
+    private fun handleCommandLogic(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
+        if (session.isWaitingForInteractiveInput) {
+            // Interactive mode: input is part of the previous command's output
+            Log.d(TAG, "Handling interactive input: $command")
+            // The PTY will echo the input, so we don't need to manually append it here.
+            // session.currentCommandOutputBuilder.appendLine(command)
+            // updateCurrentCommandOutput(session)
+            sessionManager.updateSession(session.id) {
+                it.copy(
                     isWaitingForInteractiveInput = false,
                     lastInteractivePrompt = "",
                     isInteractiveMode = false,
                     interactivePrompt = ""
                 )
             }
+        } else {
+            // Normal command
+            if (command.trim() == "clear") {
+                handleClearCommand(session)
+            } else {
+                handleRegularCommand(command, session)
+            }
+        }
     }
     
-    private suspend fun handleClearCommand(session: com.ai.assistance.operit.terminal.data.TerminalSessionData?) {
-        // 特殊处理clear命令：保留欢迎信息，清空其他历史
-        val welcomeItem = session?.commandHistory?.firstOrNull { 
+    private fun handleClearCommand(session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
+        // Special handling for clear command: keep welcome message
+        val welcomeItem = session.commandHistory.firstOrNull {
             it.prompt.isEmpty() && it.command.isEmpty() && it.output.contains("Operit")
         }
         
-        if (welcomeItem != null && session != null) {
-            sessionManager.updateSession(session.id) { session ->
-                session.copy(commandHistory = listOf(welcomeItem))
-                    }
-                }
-        
-        // 发送clear命令到终端
-        session?.sessionWriter?.write("clear\n")
-        session?.sessionWriter?.flush()
-        Log.d(TAG, "Sent clear command")
-                    }
+        sessionManager.updateSession(session.id) {
+            it.copy(commandHistory = welcomeItem?.let { listOf(it) } ?: emptyList())
+        }
+    }
     
-    private suspend fun handleRegularCommand(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData?) {
-        session?.currentCommandOutputBuilder?.clear()
+    private fun handleRegularCommand(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
+        session.currentCommandOutputBuilder.clear()
         
         val newCommandItem = CommandHistoryItem(
-            prompt = session?.currentDirectory ?: "$ ",
+            prompt = session.currentDirectory,
             command = command,
             output = "",
             isExecuting = true
         )
         
-        if (session != null) {
-            sessionManager.updateSession(session.id) { session ->
-                session.copy(commandHistory = session.commandHistory + newCommandItem)
-                }
-            }
-        
-        session?.sessionWriter?.write(command + "\n")
-        session?.sessionWriter?.flush()
-        Log.d(TAG, "Sent command: $command")
+        sessionManager.updateSession(session.id) {
+            it.copy(commandHistory = it.commandHistory + newCommandItem)
+        }
     }
 
     fun sendInterruptSignal() {
@@ -311,6 +256,25 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     
     private fun stripAnsi(text: String): String {
         return text.replace(Regex("\\x1B\\[[0-?]*[ -/]*[@-~]"), "")
+    }
+
+    private fun applyLogLimits(history: List<CommandHistoryItem>): List<CommandHistoryItem> {
+        val sizeLimitedHistory = if (history.size > MAX_HISTORY_ITEMS) {
+            history.takeLast(MAX_HISTORY_ITEMS)
+        } else {
+            history
+        }
+
+        return sizeLimitedHistory.map { item ->
+            val lines = item.output.lines()
+            if (lines.size > MAX_OUTPUT_LINES_PER_ITEM) {
+                val truncatedOutput = "... (output truncated, showing last ${MAX_OUTPUT_LINES_PER_ITEM} lines) ...\n" +
+                        lines.takeLast(MAX_OUTPUT_LINES_PER_ITEM).joinToString("\n")
+                item.copy(output = truncatedOutput)
+            } else {
+                item
+            }
+        }
     }
 
     override fun onCleared() {

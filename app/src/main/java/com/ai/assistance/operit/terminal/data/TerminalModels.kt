@@ -1,5 +1,6 @@
 package com.ai.assistance.operit.terminal.data
 
+import com.ai.assistance.operit.terminal.domain.AnsiParser
 import kotlinx.coroutines.Job
 import java.io.OutputStreamWriter
 import java.util.UUID
@@ -35,14 +36,18 @@ data class TerminalSessionData(
     val sessionWriter: OutputStreamWriter? = null,
     val currentDirectory: String = "$ ",
     val commandHistory: List<CommandHistoryItem> = emptyList(),
-    val currentCommandOutputBuilder: StringBuilder = StringBuilder(),
+    @Transient val currentCommandOutputBuilder: StringBuilder = StringBuilder(),
+    @Transient val rawBuffer: StringBuilder = StringBuilder(),
     val isWaitingForInteractiveInput: Boolean = false,
     val lastInteractivePrompt: String = "",
     val isInteractiveMode: Boolean = false,
     val interactivePrompt: String = "",
     val isInitializing: Boolean = true,
     val initState: SessionInitState = SessionInitState.INITIALIZING,
-    val readJob: Job? = null
+    val readJob: Job? = null,
+    val isFullscreen: Boolean = false,
+    val screenContent: String = "",
+    @Transient val ansiParser: AnsiParser = AnsiParser()
 )
 
 /**

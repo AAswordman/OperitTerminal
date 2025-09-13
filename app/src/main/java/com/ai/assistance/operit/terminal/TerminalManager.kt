@@ -383,21 +383,15 @@ class TerminalManager(private val context: Context) {
         env["TERM"] = "xterm-256color"
         env["LANG"] = "en_US.UTF-8"
 
-        val processBuilder = ProcessBuilder(*command)
-        processBuilder.environment().putAll(env)
-        processBuilder.directory(filesDir)
-        // Merging stdout and stderr is crucial for a terminal emulator
-        processBuilder.redirectErrorStream(true)
-
         Log.d(TAG, "Starting terminal session with command: ${command.joinToString(" ")}")
         Log.d(TAG, "Environment: $env")
 
-        val process = processBuilder.start()
+        val pty = Pty.start(command, env, filesDir)
 
         return TerminalSession(
-            process = process,
-            stdout = process.inputStream,
-            stdin = process.outputStream
+            process = pty.process,
+            stdout = pty.stdout,
+            stdin = pty.stdin
         )
     }
 } 

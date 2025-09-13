@@ -46,18 +46,26 @@ class MainActivity : ComponentActivity() {
                 val commandHistory by terminalViewModel.commandHistory.collectAsState(initial = emptyList())
                 val currentDirectory by terminalViewModel.currentDirectory.collectAsState(initial = "$ ")
                 var command by remember { mutableStateOf("") }
+                val isFullscreen by terminalViewModel.isFullscreen.collectAsState(initial = false)
+                val screenContent by terminalViewModel.screenContent.collectAsState(initial = "")
 
                 TerminalScreen(
                     sessions = sessions,
                     currentSessionId = currentSessionId,
                     commandHistory = commandHistory,
                     currentDirectory = currentDirectory,
+                    isFullscreen = isFullscreen,
+                    screenContent = screenContent,
                     command = command,
                     onCommandChange = { command = it },
-                    onSendCommand = { sentCommand ->
-                        if (sentCommand.isNotBlank()) {
-                            terminalViewModel.sendCommand(sentCommand)
-                            command = ""
+                    onSendInput = { inputText, isCommand ->
+                        if (inputText.isNotBlank()) {
+                            if (isCommand) {
+                                terminalViewModel.sendCommand(inputText)
+                                command = ""
+                            } else {
+                                terminalViewModel.sendInput(inputText)
+                            }
                         }
                     },
                     onInterrupt = { terminalViewModel.sendInterruptSignal() },

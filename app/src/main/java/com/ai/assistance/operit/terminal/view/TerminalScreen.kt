@@ -53,9 +53,11 @@ public fun TerminalScreen(
     currentSessionId: String?,
     commandHistory: List<CommandHistoryItem>,
     currentDirectory: String,
+    isFullscreen: Boolean,
+    screenContent: String,
     command: String,
     onCommandChange: (String) -> Unit,
-    onSendCommand: (String) -> Unit,
+    onSendInput: (input: String, isCommand: Boolean) -> Unit,
     onInterrupt: () -> Unit,
     onNewSession: () -> Unit,
     onSwitchSession: (String) -> Unit,
@@ -109,149 +111,34 @@ public fun TerminalScreen(
                 showDeleteConfirmDialog = true
             }
         )
-        
-        // 终端内容
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        do {
-                            val event = awaitPointerEvent(pass = PointerEventPass.Initial)
-                            
-                            // 只在有多个手指时处理缩放
-                            if (event.changes.size >= 2) {
-                                val zoom = event.calculateZoom()
-                                if (abs(zoom - 1f) > 0.01f) {
-                                    scaleFactor = max(0.5f, min(3f, scaleFactor * zoom))
-                                    // 消费事件以防止传递给LazyColumn
-                                    event.changes.forEach { it.consume() }
-                                }
-                            }
-                        } while (event.changes.any { it.pressed })
-                    }
-                }
-        ) {
-            Column(
-                modifier = Modifier.fillMaxSize()
-            ) {
-                // 历史输出 - 占满全屏
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(padding)
-                ) {
-                    items(commandHistory, key = { it.id }) { historyItem ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            // Prompt as a label
-                            Surface(
-                                modifier = Modifier.padding(end = padding * 0.5f),
-                                color = Color(0xFF006400), // DarkGreen
-                                shape = RoundedCornerShape(4.dp)
-                            ) {
-                                Text(
-                                    text = historyItem.prompt.trimEnd(),
-                                    color = Color.White,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = fontSize,
-                                    modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
-                                )
-                            }
-                            // Command
-                            Text(
-                                text = highlight(historyItem.command, isCommand = true),
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = fontSize,
-                                lineHeight = fontSize * lineHeight
-                            )
-                        }
-                        // Spacer
-                        Spacer(modifier = Modifier.height(padding * 0.25f))
 
-                        // 显示输出
-                        if (historyItem.output.isNotEmpty()) {
-                            Text(
-                                text = highlight(historyItem.output),
-                                color = Color.White,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = fontSize,
-                                lineHeight = fontSize * lineHeight,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = padding * 0.5f)
-                            )
-                        }
-
-                        // Show a progress indicator for executing commands
-                        if (historyItem.isExecuting) {
-                            Row(
-                                modifier = Modifier.padding(top = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp
-                                )
-                                Text(
-                                    text = "Executing...",
-                                    color = Color.Gray,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.padding(start = 8.dp)
-                                )
-                            }
-                        }
-                    }
+        if (isFullscreen) {
+            FullscreenContent(
+                screenContent = screenContent,
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                padding = padding,
+                onSendInput = { onSendInput(it, false) },
+                onGesture = { zoom ->
+                    scaleFactor = max(0.5f, min(3f, scaleFactor * zoom))
                 }
-                
-                // 终端工具栏
-                TerminalToolbar(
-                    onInterrupt = onInterrupt,
-                    fontSize = fontSize * 0.8f,
-                    padding = padding
-                )
-                
-                // 当前输入行
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(padding),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        modifier = Modifier.padding(end = padding * 0.5f),
-                        color = Color(0xFF006400), // DarkGreen
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = currentDirectory.ifEmpty { "$ " }.trimEnd(),
-                            color = Color.White,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = fontSize,
-                            modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
-                        )
-                    }
-                    BasicTextField(
-                        value = command,
-                        onValueChange = onCommandChange,
-                        modifier = Modifier.weight(1f),
-                        textStyle = TextStyle(
-                            color = SyntaxColors.commandDefault,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = fontSize
-                        ),
-                        cursorBrush = SolidColor(Color.Green),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = {
-                            if (command.isNotBlank()) {
-                                onSendCommand(command)
-                            }
-                        })
-                    )
+            )
+        } else {
+            TerminalContent(
+                commandHistory = commandHistory,
+                currentDirectory = currentDirectory,
+                command = command,
+                onCommandChange = onCommandChange,
+                onSendCommand = { onSendInput(it, true) },
+                onInterrupt = onInterrupt,
+                listState = listState,
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                padding = padding,
+                onGesture = { zoom ->
+                    scaleFactor = max(0.5f, min(3f, scaleFactor * zoom))
                 }
-            }
+            )
         }
     }
     
@@ -309,6 +196,245 @@ public fun TerminalScreen(
             titleContentColor = Color.White,
             textContentColor = Color.Gray
         )
+    }
+}
+
+@Composable
+private fun FullscreenContent(
+    screenContent: String,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    lineHeight: Float,
+    padding: androidx.compose.ui.unit.Dp,
+    onSendInput: (String) -> Unit,
+    onGesture: (zoom: Float) -> Unit
+) {
+    var textFieldValue by remember { mutableStateOf("") }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                        if (event.changes.size >= 2) {
+                            val zoom = event.calculateZoom()
+                            if (abs(zoom - 1f) > 0.01f) {
+                                onGesture(zoom)
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            }
+            .padding(padding)
+    ) {
+        // This text displays the actual terminal content from the PTY
+        Text(
+            text = screenContent,
+            color = Color.White,
+            fontFamily = FontFamily.Monospace,
+            fontSize = fontSize,
+            lineHeight = fontSize * lineHeight,
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // This is an invisible text field that captures all keyboard input
+        BasicTextField(
+            value = textFieldValue,
+            onValueChange = {
+                // This is a simplified approach. A more robust solution
+                // would compare the old and new text to determine what was
+                // typed (e.g., handling backspace, pasting text).
+                val typedText = if (it.length > textFieldValue.length) {
+                    it.substring(textFieldValue.length)
+                } else {
+                    // Handle backspace. The ASCII backspace character is 8.
+                    // Another common one is DEL (127). Vim uses BS.
+                    "\u0008"
+                }
+                onSendInput(typedText)
+                
+                // We keep the text field's internal state, but it could also be cleared.
+                // For vim, it's better to keep it to handle multi-character sequences,
+                // but for raw input, clearing it after sending might be an option.
+                textFieldValue = it
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+            textStyle = TextStyle(
+                // Make the text transparent so it's not visible
+                color = Color.Transparent, 
+                fontFamily = FontFamily.Monospace,
+                fontSize = fontSize
+            ),
+            cursorBrush = SolidColor(Color.Transparent), // Hide the cursor
+            keyboardOptions = KeyboardOptions.Default.copy(
+                // No specific action, we want raw input
+                imeAction = ImeAction.None 
+            )
+        )
+    }
+}
+
+@Composable
+private fun TerminalContent(
+    commandHistory: List<CommandHistoryItem>,
+    currentDirectory: String,
+    command: String,
+    onCommandChange: (String) -> Unit,
+    onSendCommand: (String) -> Unit,
+    onInterrupt: () -> Unit,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    lineHeight: Float,
+    padding: androidx.compose.ui.unit.Dp,
+    onGesture: (zoom: Float) -> Unit
+) {
+    // 终端内容
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+
+                        // 只在有多个手指时处理缩放
+                        if (event.changes.size >= 2) {
+                            val zoom = event.calculateZoom()
+                            if (abs(zoom - 1f) > 0.01f) {
+                                onGesture(zoom)
+                                // 消费事件以防止传递给LazyColumn
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            }
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // 历史输出 - 占满全屏
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(padding)
+            ) {
+                items(commandHistory, key = { it.id }) { historyItem ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Prompt as a label
+                        Surface(
+                            modifier = Modifier.padding(end = padding * 0.5f),
+                            color = Color(0xFF006400), // DarkGreen
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = historyItem.prompt.trimEnd(),
+                                color = Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = fontSize,
+                                modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
+                            )
+                        }
+                        // Command
+                        Text(
+                            text = highlight(historyItem.command, isCommand = true),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = fontSize,
+                            lineHeight = fontSize * lineHeight
+                        )
+                    }
+                    // Spacer
+                    Spacer(modifier = Modifier.height(padding * 0.25f))
+
+                    // 显示输出
+                    if (historyItem.output.isNotEmpty()) {
+                        Text(
+                            text = highlight(historyItem.output),
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = fontSize,
+                            lineHeight = fontSize * lineHeight,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = padding * 0.5f)
+                        )
+                    }
+
+                    // Show a progress indicator for executing commands
+                    if (historyItem.isExecuting) {
+                        Row(
+                            modifier = Modifier.padding(top = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Text(
+                                text = "Executing...",
+                                color = Color.Gray,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 终端工具栏
+            TerminalToolbar(
+                onInterrupt = onInterrupt,
+                fontSize = fontSize * 0.8f,
+                padding = padding
+            )
+
+            // 当前输入行
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(padding),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    modifier = Modifier.padding(end = padding * 0.5f),
+                    color = Color(0xFF006400), // DarkGreen
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Text(
+                        text = currentDirectory.ifEmpty { "$ " }.trimEnd(),
+                        color = Color.White,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = fontSize,
+                        modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
+                    )
+                }
+                BasicTextField(
+                    value = command,
+                    onValueChange = onCommandChange,
+                    modifier = Modifier.weight(1f),
+                    textStyle = TextStyle(
+                        color = SyntaxColors.commandDefault,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = fontSize
+                    ),
+                    cursorBrush = SolidColor(Color.Green),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = {
+                        if (command.isNotBlank()) {
+                            onSendCommand(command)
+                        }
+                    })
+                )
+            }
+        }
     }
 }
 

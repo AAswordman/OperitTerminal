@@ -20,11 +20,89 @@ class OutputProcessor {
      */
     fun processOutput(
         sessionId: String,
+        chunk: String,
+        sessionManager: SessionManager
+    ) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        session.rawBuffer.append(chunk)
+
+        Log.d(TAG, "Processing chunk for session $sessionId. New buffer size: ${session.rawBuffer.length}")
+
+        // 始终检查全屏模式切换
+        if (detectFullscreenMode(sessionId, session.rawBuffer, sessionManager)) {
+            // 如果检测到模式切换，缓冲区可能已被修改，及早返回以处理下一个块
+            return
+        }
+
+        // 如果在全屏模式下，将所有内容附加到屏幕内容
+        if (session.isFullscreen) {
+            updateScreenContent(sessionId, chunk, sessionManager)
+            // Do not clear the raw buffer here, the parser needs the stream
+            return
+        }
+        
+        // 从缓冲区中提取并处理行
+        while (session.rawBuffer.isNotEmpty()) {
+            val bufferContent = session.rawBuffer.toString()
+            val newlineIndex = bufferContent.indexOf('\n')
+            val carriageReturnIndex = bufferContent.indexOf('\r')
+
+            if (carriageReturnIndex != -1 && (newlineIndex == -1 || carriageReturnIndex < newlineIndex)) {
+                // We have a carriage return.
+                val line = bufferContent.substring(0, carriageReturnIndex)
+                
+                val isCRLF = carriageReturnIndex + 1 < bufferContent.length && bufferContent[carriageReturnIndex + 1] == '\n'
+                val consumedLength = if (isCRLF) carriageReturnIndex + 2 else carriageReturnIndex + 1
+                
+                session.rawBuffer.delete(0, consumedLength)
+
+                if (isCRLF) {
+                    // It's a CRLF, treat as a normal line.
+                    Log.d(TAG, "Processing CRLF line: '$line'")
+                    processLine(sessionId, line, sessionManager)
+                } else {
+                    // It's just CR, treat as a progress update.
+                    Log.d(TAG, "Processing CR line: '$line'")
+                    handleProgressLine(sessionId, line, sessionManager)
+                }
+            } else if (newlineIndex != -1) {
+                // We have a newline without a preceding carriage return.
+                val line = bufferContent.substring(0, newlineIndex)
+                session.rawBuffer.delete(0, newlineIndex + 1)
+                Log.d(TAG, "Processing LF line: '$line'")
+                processLine(sessionId, line, sessionManager)
+            } else {
+                // No full line-terminator found in the buffer.
+                // Check if the remaining buffer is a prompt.
+                val remainingContent = stripAnsi(bufferContent)
+                if (isPrompt(remainingContent) || isInteractivePrompt(remainingContent)) {
+                    Log.d(TAG, "Processing remaining buffer as interactive/shell prompt: '$bufferContent'")
+                    processLine(sessionId, bufferContent, sessionManager)
+                    session.rawBuffer.clear()
+                }
+                break // Exit loop, wait for more data.
+            }
+        }
+    }
+
+    private fun handleProgressLine(sessionId: String, line: String, sessionManager: SessionManager) {
+        val cleanLine = stripAnsi(line)
+        if (cleanLine.isEmpty()) {
+            return
+        }
+        val session = sessionManager.getSession(sessionId) ?: return
+        if (session.initState != SessionInitState.READY) {
+            processLine(sessionId, line, sessionManager)
+            return
+        }
+        updateProgressOutput(sessionId, cleanLine, sessionManager)
+    }
+
+    private fun processLine(
+        sessionId: String,
         line: String,
         sessionManager: SessionManager
     ) {
-        Log.d(TAG, "Processing output for session $sessionId: $line")
-        
         val session = sessionManager.getSession(sessionId) ?: return
         
         when (session.initState) {
@@ -41,44 +119,6 @@ class OutputProcessor {
                 handleReadyState(sessionId, line, sessionManager)
             }
         }
-    }
-    
-    /**
-     * 处理进度输出（回车符分隔的输出）
-     */
-    fun processProgressOutput(
-        sessionId: String,
-        line: String,
-        sessionManager: SessionManager
-    ) {
-        Log.d(TAG, "Processing progress output for session $sessionId: $line")
-        
-        val session = sessionManager.getSession(sessionId) ?: return
-        
-        if (session.initState != SessionInitState.READY) {
-            return // 在会话完全准备好之前，丢弃所有进度输出
-        }
-        
-        val cleanLine = stripAnsi(line)
-        
-        if (cleanLine.trim().isEmpty()) {
-            return
-        }
-        
-        // 检测命令回显
-        if (isCommandEcho(cleanLine, session)) {
-            Log.d(TAG, "Ignoring progress command echo: '$cleanLine'")
-            return
-        }
-        
-        // 检测交互式提示符
-        if (isInteractivePrompt(cleanLine)) {
-            handleInteractivePrompt(sessionId, cleanLine, sessionManager, isProgress = true)
-            return
-        }
-        
-        // 更新进度输出
-        updateProgressOutput(sessionId, cleanLine, sessionManager)
     }
     
     private fun handleInitializingState(
@@ -168,6 +208,12 @@ class OutputProcessor {
         
         // 处理提示符
         if (handlePrompt(sessionId, cleanLine, sessionManager)) {
+            return
+        }
+
+        // 如果在全屏模式下，不应到达这里，但作为安全措施
+        if (session.isFullscreen) {
+            updateScreenContent(sessionId, line, sessionManager)
             return
         }
         
@@ -277,8 +323,7 @@ class OutputProcessor {
     private fun handleInteractivePrompt(
         sessionId: String,
         cleanLine: String,
-        sessionManager: SessionManager,
-        isProgress: Boolean = false
+        sessionManager: SessionManager
     ) {
         Log.d(TAG, "Detected interactive prompt: $cleanLine")
         sessionManager.updateSession(sessionId) { session ->
@@ -292,7 +337,7 @@ class OutputProcessor {
         
         // 将交互式提示添加到当前命令的输出中
         if (cleanLine.isNotBlank()) {
-            updateCommandOutput(sessionId, cleanLine, sessionManager, isProgress)
+            updateCommandOutput(sessionId, cleanLine, sessionManager)
         }
     }
     
@@ -312,11 +357,14 @@ class OutputProcessor {
     private fun updateCommandOutput(
         sessionId: String,
         cleanLine: String,
-        sessionManager: SessionManager,
-        isProgress: Boolean = false
+        sessionManager: SessionManager
     ) {
         val session = sessionManager.getSession(sessionId) ?: return
-        session.currentCommandOutputBuilder.appendLine(cleanLine)
+        val builder = session.currentCommandOutputBuilder
+        if (builder.isNotEmpty() && builder.last() != '\n') {
+            builder.append('\n')
+        }
+        builder.appendLine(cleanLine)
         
         val sessionCommandHistory = session.commandHistory
         val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
@@ -342,6 +390,24 @@ class OutputProcessor {
         sessionManager: SessionManager
     ) {
         val session = sessionManager.getSession(sessionId) ?: return
+
+        // Progress updates should manipulate the currentCommandOutputBuilder
+        val builderContent = session.currentCommandOutputBuilder.toString()
+        val lines = if (builderContent.isEmpty()) {
+            mutableListOf()
+        } else {
+            builderContent.split('\n').toMutableList()
+        }
+
+        if (lines.isNotEmpty()) {
+            lines[lines.size - 1] = cleanLine
+        } else {
+            lines.add(cleanLine)
+        }
+        
+        session.currentCommandOutputBuilder.clear()
+        session.currentCommandOutputBuilder.append(lines.joinToString("\n"))
+
         val sessionCommandHistory = session.commandHistory
         val lastExecutingIndex = sessionCommandHistory.indexOfLast { it.isExecuting }
         
@@ -349,23 +415,11 @@ class OutputProcessor {
             val updatedHistory = sessionCommandHistory.toMutableList()
             val oldItem = updatedHistory[lastExecutingIndex]
             
-            val existingOutput = oldItem.output
-            val lines = if (existingOutput.isEmpty()) {
-                mutableListOf(cleanLine)
-            } else {
-                existingOutput.split('\n').toMutableList()
-            }
-            
-            // 如果是进度条格式，替换最后一行
-            if (lines.isNotEmpty() && isProgressLine(cleanLine)) {
-                lines[lines.size - 1] = cleanLine
-            } else {
-                lines.add(cleanLine)
-            }
-            
+            // Update history from the builder
             updatedHistory[lastExecutingIndex] = oldItem.copy(
-                output = lines.joinToString("\n")
+                output = session.currentCommandOutputBuilder.toString().trimEnd()
             )
+
             sessionManager.updateSession(sessionId) { session ->
                 session.copy(commandHistory = updatedHistory)
             }
@@ -449,7 +503,7 @@ class OutputProcessor {
                 existingOutput.split('\n').toMutableList()
             }
             
-            if (lines.isNotEmpty() && isProgressLine(line)) {
+            if (lines.isNotEmpty()) {
                 lines[lines.size - 1] = line
             } else {
                 lines.add(line)
@@ -492,4 +546,69 @@ class OutputProcessor {
     private fun stripAnsi(text: String): String {
         return text.replace(Regex("\\x1B\\[[0-?]*[ -/]*[@-~]"), "")
     }
-} 
+
+    /**
+     * 检测并处理全屏模式切换
+     * @return 如果处理了全屏模式切换，则返回 true
+     */
+    private fun detectFullscreenMode(sessionId: String, buffer: StringBuilder, sessionManager: SessionManager): Boolean {
+        // CSI ? 1049 h: 启用备用屏幕缓冲区（进入全屏模式）
+        // CSI ? 1049 l: 禁用备用屏幕缓冲区（退出全屏模式）
+        val enterFullscreen = "\u001B[?1049h"
+        val exitFullscreen = "\u001B[?1049l"
+
+        val bufferContent = buffer.toString()
+
+        val enterIndex = bufferContent.indexOf(enterFullscreen)
+        val exitIndex = bufferContent.indexOf(exitFullscreen)
+
+        if (enterIndex != -1) {
+            Log.d(TAG, "Entering fullscreen mode for session $sessionId")
+            val remainingContent = bufferContent.substring(enterIndex + enterFullscreen.length)
+            
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(
+                    isFullscreen = true, 
+                    screenContent = remainingContent // 将切换后的所有内容视为屏幕内容
+                )
+            }
+            buffer.clear()
+            return true
+        }
+
+        if (exitIndex != -1) {
+            Log.d(TAG, "Exiting fullscreen mode for session $sessionId")
+            val outputBeforeExit = bufferContent.substring(0, exitIndex)
+            
+            // 更新最后一个命令的输出
+            if (outputBeforeExit.isNotEmpty()) {
+                updateCommandOutput(sessionId, outputBeforeExit, sessionManager)
+            }
+
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(isFullscreen = false, screenContent = "")
+            }
+            
+            // 消耗包括退出代码在内的所有内容
+            buffer.delete(0, exitIndex + exitFullscreen.length)
+
+            // 退出全屏后，我们可能需要重新绘制提示符
+            finishCurrentCommand(sessionId, sessionManager)
+            return true
+        }
+        return false
+    }
+
+    /**
+     * 更新全屏内容
+     */
+    private fun updateScreenContent(sessionId: String, content: String, sessionManager: SessionManager) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        val processedContent = session.ansiParser.parse(content)
+        sessionManager.updateSession(sessionId) { sessionToUpdate ->
+            // Here we replace the content entirely since vim and other fullscreen apps
+            // send full screen updates. The AnsiParser now manages the screen buffer.
+            sessionToUpdate.copy(screenContent = processedContent)
+        }
+    }
+}
