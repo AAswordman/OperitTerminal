@@ -89,7 +89,7 @@ class OutputProcessor {
                 // No full line-terminator found in the buffer.
                 // Check if the remaining buffer is a prompt.
                 val remainingContent = stripAnsi(bufferContent)
-                if (isPrompt(remainingContent) || isInteractivePrompt(remainingContent)) {
+                if (isPrompt(remainingContent) || isPersistentInteractivePrompt(remainingContent) || isInteractivePrompt(remainingContent)) {
                     Log.d(TAG, "Processing remaining buffer as interactive/shell prompt: '$bufferContent'")
                     processLine(sessionId, bufferContent, sessionManager)
                     session.rawBuffer.clear()
@@ -244,14 +244,20 @@ class OutputProcessor {
             return
         }
 
-        // 检测交互式提示符
-        if (isInteractivePrompt(cleanLine)) {
-            handleInteractivePrompt(sessionId, cleanLine, sessionManager)
+        // 优先处理常规提示符，因为它表示命令结束，应退出任何交互模式
+        if (handlePrompt(sessionId, cleanLine, sessionManager)) {
             return
         }
 
-        // 处理提示符
-        if (handlePrompt(sessionId, cleanLine, sessionManager)) {
+        // 检测持久性交互提示符 (e.g., node >)
+        if (isPersistentInteractivePrompt(cleanLine)) {
+            handlePersistentInteractivePrompt(sessionId, cleanLine, sessionManager)
+            return
+        }
+
+        // 检测临时性交互提示符 (e.g., [y/n])
+        if (isInteractivePrompt(cleanLine)) {
+            handleInteractivePrompt(sessionId, cleanLine, sessionManager)
             return
         }
 
@@ -334,6 +340,16 @@ class OutputProcessor {
         }
 
         if (isAPrompt) {
+            // 检测到常规提示符，表示我们回到了shell。
+            // 确保退出任何持久的交互模式。
+            if (session.isInteractiveMode) {
+                sessionManager.updateSession(sessionId) {
+                    it.copy(
+                        isInteractiveMode = false,
+                        interactivePrompt = ""
+                    )
+                }
+            }
             finishCurrentCommand(sessionId, sessionManager)
             return true
         }
@@ -341,7 +357,7 @@ class OutputProcessor {
     }
 
     /**
-     * 检测是否是交互式提示符
+     * 检测是否是临时性交互提示符 (例如 y/n)
      */
     fun isInteractivePrompt(line: String): Boolean {
         val cleanLine = line.trim().lowercase()
@@ -364,6 +380,19 @@ class OutputProcessor {
         }
     }
 
+    /**
+     * 检测是否是持久性交互提示符 (例如 Node.js REPL)
+     */
+    private fun isPersistentInteractivePrompt(line: String): Boolean {
+        val trimmed = line.trim()
+        return trimmed == ">" ||
+                trimmed.startsWith("> ") ||
+                trimmed == "..." ||
+                trimmed.startsWith("... ") ||
+                trimmed == ">>>" ||
+                trimmed.startsWith(">>> ")
+    }
+
     private fun handleInteractivePrompt(
         sessionId: String,
         cleanLine: String,
@@ -374,7 +403,8 @@ class OutputProcessor {
             session.copy(
                 isWaitingForInteractiveInput = true,
                 lastInteractivePrompt = cleanLine,
-                isInteractiveMode = true,
+                // Do not set isInteractiveMode to true for temporary prompts
+                // isInteractiveMode = true, 
                 interactivePrompt = cleanLine
             )
         }
@@ -382,6 +412,21 @@ class OutputProcessor {
         // 将交互式提示添加到当前命令的输出中
         if (cleanLine.isNotBlank()) {
             updateCommandOutput(sessionId, cleanLine, sessionManager)
+        }
+    }
+
+    private fun handlePersistentInteractivePrompt(
+        sessionId: String,
+        cleanLine: String,
+        sessionManager: SessionManager
+    ) {
+        Log.d(TAG, "Detected persistent interactive prompt: $cleanLine")
+        finishCurrentCommand(sessionId, sessionManager)
+        sessionManager.updateSession(sessionId) { session ->
+            session.copy(
+                isInteractiveMode = true,
+                interactivePrompt = cleanLine.trim()
+            )
         }
     }
 
@@ -623,11 +668,12 @@ class OutputProcessor {
      */
     private fun updateScreenContent(sessionId: String, content: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
-        val processedContent = session.ansiParser.parse(content)
+        session.ansiParser.parse(content)
+        val renderedScreen = session.ansiParser.renderScreenToString()
         sessionManager.updateSession(sessionId) { sessionToUpdate ->
             // Here we replace the content entirely since vim and other fullscreen apps
             // send full screen updates. The AnsiParser now manages the screen buffer.
-            sessionToUpdate.copy(screenContent = processedContent)
+            sessionToUpdate.copy(screenContent = renderedScreen)
         }
     }
 }

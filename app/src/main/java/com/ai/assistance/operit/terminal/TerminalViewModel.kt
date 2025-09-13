@@ -170,8 +170,13 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 )
             }
         } else {
-            // Normal command
-            if (command.trim() == "clear") {
+            // Normal command or input for a persistent interactive session (like node)
+            if (session.isInteractiveMode) {
+                // In persistent interactive mode, we don't create a new history item.
+                // The input is just sent to the running process.
+                // The output will be handled by the OutputProcessor.
+                Log.d(TAG, "Sending input to interactive session: $command")
+            } else if (command.trim() == "clear") {
                 handleClearCommand(session)
             } else {
                 handleRegularCommand(command, session)
