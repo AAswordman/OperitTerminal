@@ -1,7 +1,7 @@
-package com.ai.assistance.operit.terminal.aidl;
+package com.ai.assistance.operit.terminal;
 
-import com.ai.assistance.operit.terminal.aidl.ITerminalCallback;
-import com.ai.assistance.operit.terminal.aidl.TerminalStateParcelable;
+import com.ai.assistance.operit.terminal.ITerminalCallback;
+import com.ai.assistance.operit.terminal.TerminalStateParcelable;
 
 interface ITerminalService {
     String createSession();
