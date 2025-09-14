@@ -10,19 +10,18 @@ import androidx.annotation.RequiresApi
 import com.ai.assistance.operit.terminal.TerminalViewModel
 import com.ai.assistance.operit.terminal.ITerminalCallback
 import com.ai.assistance.operit.terminal.ITerminalService
-import com.ai.assistance.operit.terminal.CommandHistoryItemParcelable
-import com.ai.assistance.operit.terminal.TerminalSessionDataParcelable
-import com.ai.assistance.operit.terminal.data.TerminalState
-import com.ai.assistance.operit.terminal.data.TerminalSessionData
-import com.ai.assistance.operit.terminal.data.CommandHistoryItem
-import com.ai.assistance.operit.terminal.TerminalStateParcelable
+import com.ai.assistance.operit.terminal.CommandExecutionEvent
+import com.ai.assistance.operit.terminal.SessionDirectoryEvent
+import com.ai.assistance.operit.terminal.data.SessionInitState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
-@RequiresApi(Build.VERSION_CODES.O)
 class TerminalService : Service() {
 
     private val job = SupervisorJob()
@@ -34,6 +33,19 @@ class TerminalService : Service() {
     private val binder = object : ITerminalService.Stub() {
         override fun createSession(): String {
             val newSession = viewModel.createNewSession()
+            
+            // 阻塞等待会话初始化完成
+            runBlocking {
+                withTimeoutOrNull(30000) { // 30秒超时
+                    viewModel.terminalState.first { state ->
+                        val session = state.sessions.find { it.id == newSession.id }
+                        session?.initState == SessionInitState.READY
+                    }
+                } ?: run {
+                    Log.e("TerminalService", "Session initialization timeout for session: ${newSession.id}")
+                }
+            }
+            
             return newSession.id
         }
 
@@ -45,8 +57,8 @@ class TerminalService : Service() {
             viewModel.closeSession(sessionId)
         }
 
-        override fun sendCommand(command: String) {
-            viewModel.sendCommand(command)
+        override fun sendCommand(command: String): String {
+            return viewModel.sendCommand(command)
         }
 
         override fun sendInterruptSignal() {
@@ -62,35 +74,27 @@ class TerminalService : Service() {
         }
 
         override fun requestStateUpdate() {
-            val currentState = viewModel.terminalState.value
-            val parcelableState = mapTerminalStateToParcelable(currentState)
-            val n = callbacks.beginBroadcast()
-            for (i in 0 until n) {
-                try {
-                    callbacks.getBroadcastItem(i).onStateUpdated(parcelableState)
-                } catch (e: Exception) {
-                    Log.e("TerminalService", "Error sending state update", e)
-                }
-            }
-            callbacks.finishBroadcast()
+            // 新架构下不需要请求完整状态更新
         }
     }
 
     override fun onCreate() {
         super.onCreate()
         viewModel = TerminalViewModel(application)
-        viewModel.terminalState
-            .onEach { state ->
-                val parcelableState = mapTerminalStateToParcelable(state)
-                val n = callbacks.beginBroadcast()
-                for (i in 0 until n) {
-                    try {
-                        callbacks.getBroadcastItem(i).onStateUpdated(parcelableState)
-                    } catch (e: Exception) {
-                       Log.e("TerminalService", "Error broadcasting state", e)
-                    }
-                }
-                callbacks.finishBroadcast()
+        
+        // 监听命令执行事件
+        viewModel.commandExecutionEvents
+            .onEach { event ->
+                Log.d("TerminalService", "Received command execution event: $event")
+                broadcastCommandExecutionEvent(event)
+            }
+            .launchIn(scope)
+            
+        // 监听目录变化事件
+        viewModel.directoryChangeEvents
+            .onEach { event ->
+                Log.d("TerminalService", "Received directory change event: $event")
+                broadcastDirectoryChangeEvent(event)
             }
             .launchIn(scope)
     }
@@ -105,35 +109,31 @@ class TerminalService : Service() {
         callbacks.kill()
     }
     
-    // Mapper functions
-    private fun mapTerminalStateToParcelable(state: TerminalState): TerminalStateParcelable {
-        return TerminalStateParcelable(
-            sessions = state.sessions.map { mapSessionToParcelable(it) },
-            currentSessionId = state.currentSessionId,
-            isLoading = state.isLoading,
-            error = state.error
-        )
+    // 事件广播方法
+    private fun broadcastCommandExecutionEvent(event: CommandExecutionEvent) {
+        val n = callbacks.beginBroadcast()
+        Log.d("TerminalService", "Broadcasting command execution event to $n callbacks: $event")
+        for (i in 0 until n) {
+            try {
+                callbacks.getBroadcastItem(i).onCommandExecutionUpdate(event)
+                Log.d("TerminalService", "Successfully sent command execution event to callback $i")
+            } catch (e: Exception) {
+                Log.e("TerminalService", "Error broadcasting command execution event to callback $i", e)
+            }
+        }
+        callbacks.finishBroadcast()
+        Log.d("TerminalService", "Finished broadcasting command execution event")
     }
-
-    private fun mapSessionToParcelable(session: TerminalSessionData): TerminalSessionDataParcelable {
-        return TerminalSessionDataParcelable(
-            id = session.id,
-            title = session.title,
-            currentDirectory = session.currentDirectory,
-            commandHistory = session.commandHistory.map { mapCommandHistoryItemToParcelable(it) },
-            isInteractiveMode = session.isInteractiveMode,
-            interactivePrompt = session.interactivePrompt,
-            isInitializing = session.isInitializing
-        )
-    }
-
-    private fun mapCommandHistoryItemToParcelable(item: CommandHistoryItem): CommandHistoryItemParcelable {
-        return CommandHistoryItemParcelable(
-            id = item.id,
-            prompt = item.prompt,
-            command = item.command,
-            output = item.output,
-            isExecuting = item.isExecuting
-        )
+    
+    private fun broadcastDirectoryChangeEvent(event: SessionDirectoryEvent) {
+        val n = callbacks.beginBroadcast()
+        for (i in 0 until n) {
+            try {
+                callbacks.getBroadcastItem(i).onSessionDirectoryChanged(event)
+            } catch (e: Exception) {
+                Log.e("TerminalService", "Error broadcasting directory change event", e)
+            }
+        }
+        callbacks.finishBroadcast()
     }
 } 

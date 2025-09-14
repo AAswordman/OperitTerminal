@@ -17,7 +17,7 @@
 -   创建和管理多个终端会话。
 -   处理命令的发送和中断信号。
 -   维护每个会话的状态，包括命令历史、当前目录等。
--   通过回调机制将状态更新通知给客户端。
+-   通过事件回调机制将命令执行更新和会话变化通知给客户端。
 
 客户端通过绑定到该服务并使用 `ITerminalService` 接口与服务进行通信。
 
@@ -78,25 +78,34 @@ override fun onStop() {
 | `closeSession`        | `in String sessionId`              | `void`   | 关闭指定 ID 的会话。                           |
 | `sendCommand`         | `in String command`                | `void`   | 向当前会话发送一个命令。                       |
 | `sendInterruptSignal` | -                                  | `void`   | 向当前会话发送中断信号 (Ctrl+C)。              |
-| `registerCallback`    | `in ITerminalCallback callback`    | `void`   | 注册一个回调以接收终端状态更新。               |
+| `registerCallback`    | `in ITerminalCallback callback`    | `void`   | 注册一个回调以接收终端事件更新。               |
 | `unregisterCallback`  | `in ITerminalCallback callback`    | `void`   | 取消注册一个回调。                             |
 | `requestStateUpdate`  | -                                  | `void`   | 请求立即获取一次最新的终端状态。               |
 
 #### `ITerminalCallback.aidl`
 
-这是一个单向（`oneway`）接口，用于从服务接收状态更新。客户端需要实现此接口。
+这是一个单向（`oneway`）接口，用于从服务接收事件更新。客户端需要实现此接口。
 
-| 方法名           | 参数                                   | 描述                                     |
-| ---------------- | -------------------------------------- | ---------------------------------------- |
-| `onStateUpdated` | `in TerminalStateParcelable state`     | 当终端状态发生变化时由服务调用此方法。   |
+| 方法名                        | 参数                                      | 描述                                     |
+| ---------------------------- | ----------------------------------------- | ---------------------------------------- |
+| `onCommandExecutionUpdate`   | `in CommandExecutionEvent event`         | 当命令执行过程中有输出更新时调用此方法。   |
+| `onSessionDirectoryChanged`  | `in SessionDirectoryEvent event`         | 当会话的当前目录发生变化时调用此方法。     |
 
 ### 数据模型
 
-AIDL 接口使用以下 `Parcelable` 对象来传输数据：
+AIDL 接口使用以下事件对象来传输数据：
 
--   `TerminalStateParcelable`: 表示整个终端的完整状态，包括所有会话列表和当前会话ID。
--   `TerminalSessionDataParcelable`: 表示单个终端会话的状态，包括其 ID、命令历史、当前目录等。
--   `CommandHistoryItemParcelable`: 表示一条命令历史记录，包括提示符、输入的命令和命令的输出。
+#### `CommandExecutionEvent`
+表示命令执行过程中的事件，包含以下字段：
+-   `commandId: String`: 命令的唯一标识符
+-   `sessionId: String`: 执行命令的会话ID
+-   `outputChunk: String`: 命令执行过程中的输出片段
+-   `isCompleted: Boolean`: 命令是否执行完毕
+
+#### `SessionDirectoryEvent`
+表示会话目录变化事件，包含以下字段：
+-   `sessionId: String`: 会话的唯一标识符
+-   `currentDirectory: String`: 会话的当前工作目录
 
 ### 使用示例
 
@@ -106,13 +115,28 @@ AIDL 接口使用以下 `Parcelable` 对象来传输数据：
 // 在你的 Activity 或 ViewModel 中
 
 private val terminalCallback = object : ITerminalCallback.Stub() {
-    override fun onStateUpdated(state: TerminalStateParcelable?) {
-        // 在主线程上处理状态更新
+    override fun onCommandExecutionUpdate(event: CommandExecutionEvent?) {
+        // 在主线程上处理命令执行更新
         activity?.runOnUiThread {
-            state?.let {
+            event?.let {
+                // 处理命令输出更新
+                Log.d("TerminalClient", "Command ${it.commandId} output: ${it.outputChunk}")
+                if (it.isCompleted) {
+                    Log.d("TerminalClient", "Command ${it.commandId} completed")
+                }
                 // 更新你的 UI
-                // 例如: updateUi(it)
-                Log.d("TerminalClient", "New state received. Current session: ${it.currentSessionId}")
+                // 例如: updateCommandOutput(it)
+            }
+        }
+    }
+
+    override fun onSessionDirectoryChanged(event: SessionDirectoryEvent?) {
+        // 在主线程上处理目录变化
+        activity?.runOnUiThread {
+            event?.let {
+                Log.d("TerminalClient", "Session ${it.sessionId} directory changed to: ${it.currentDirectory}")
+                // 更新你的 UI
+                // 例如: updateCurrentDirectory(it)
             }
         }
     }

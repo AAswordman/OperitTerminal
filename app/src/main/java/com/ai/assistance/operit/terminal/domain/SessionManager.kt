@@ -8,6 +8,7 @@ import com.ai.assistance.operit.terminal.data.TerminalState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.UUID
 
 /**
  * 终端会话管理器
@@ -29,6 +30,7 @@ class SessionManager(private val terminalManager: TerminalManager) {
         )
         newSession.commandHistory.add(
                 com.ai.assistance.operit.terminal.data.CommandHistoryItem(
+                    id = UUID.randomUUID().toString(),
                     prompt = "",
                     command = "Initializing environment...",
                     output = "",

@@ -14,17 +14,30 @@ import java.util.UUID
  * 命令历史项数据类
  */
 class CommandHistoryItem(
-    val id: String = UUID.randomUUID().toString(),
+    val id: String,
     prompt: String,
     command: String,
     output: String,
     isExecuting: Boolean = false
 ) {
-    var prompt by mutableStateOf(prompt)
-    var command by mutableStateOf(command)
-    var output by mutableStateOf(output)
+    private var _prompt by mutableStateOf(prompt)
+    private var _command by mutableStateOf(command)
+    private var _output by mutableStateOf(output)
+    private var _isExecuting by mutableStateOf(isExecuting)
+    
     val outputPages = mutableStateListOf<String>()
-    var isExecuting by mutableStateOf(isExecuting)
+    
+    // 为AIDL序列化提供稳定的getter
+    val prompt: String get() = _prompt
+    val command: String get() = _command
+    val output: String get() = _output
+    val isExecuting: Boolean get() = _isExecuting
+    
+    // 为UI更新提供setter方法
+    fun setPrompt(value: String) { _prompt = value }
+    fun setCommand(value: String) { _command = value }
+    fun setOutput(value: String) { _output = value }
+    fun setExecuting(value: Boolean) { _isExecuting = value }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

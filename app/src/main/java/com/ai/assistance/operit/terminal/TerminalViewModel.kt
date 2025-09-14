@@ -16,9 +16,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import java.util.UUID
 
 @RequiresApi(Build.VERSION_CODES.O)
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
@@ -31,10 +35,28 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private val terminalManager = TerminalManager(application)
     private val sessionManager = SessionManager(terminalManager)
-    private val outputProcessor = OutputProcessor()
+    private val outputProcessor = OutputProcessor(
+        onCommandExecutionEvent = { event ->
+            viewModelScope.launch {
+                _commandExecutionEvents.emit(event)
+            }
+        },
+        onDirectoryChangeEvent = { event ->
+            viewModelScope.launch {
+                _directoryChangeEvents.emit(event)
+            }
+        }
+    )
     
     // 暴露会话管理器的状态
     val terminalState: StateFlow<TerminalState> = sessionManager.state
+    
+    // 事件流
+    private val _commandExecutionEvents = MutableSharedFlow<CommandExecutionEvent>()
+    val commandExecutionEvents: SharedFlow<CommandExecutionEvent> = _commandExecutionEvents.asSharedFlow()
+    
+    private val _directoryChangeEvents = MutableSharedFlow<SessionDirectoryEvent>()
+    val directoryChangeEvents: SharedFlow<SessionDirectoryEvent> = _directoryChangeEvents.asSharedFlow()
     
     // 为了向后兼容，提供单独的状态流
     val sessions = terminalState.map { it.sessions }
@@ -127,12 +149,13 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
     
-    fun sendCommand(command: String) {
-        // Wrapper for sending a command, which is just input with a newline.
-        sendInput(command, isCommand = true)
+    fun sendCommand(command: String): String {
+        val commandId = UUID.randomUUID().toString()
+        sendInput(command, isCommand = true, commandId = commandId)
+        return commandId
     }
 
-    fun sendInput(input: String, isCommand: Boolean = false) {
+    fun sendInput(input: String, isCommand: Boolean = false, commandId: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             val session = sessionManager.getCurrentSession() ?: return@launch
             
@@ -143,8 +166,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 Log.d(TAG, "Sent input. isCommand=$isCommand, input='$fullInput'")
 
                 if (isCommand) {
-                    // Only commands are added to history and trigger state changes
-                    handleCommandLogic(input, session)
+                    require(commandId != null) { "commandId must be provided when isCommand is true" }
+                    handleCommandLogic(input, session, commandId)
                 }
 
             } catch (e: Exception) {
@@ -154,7 +177,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    private fun handleCommandLogic(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
+    private fun handleCommandLogic(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData, commandId: String) {
         if (session.isWaitingForInteractiveInput) {
             // Interactive mode: input is part of the previous command's output
             Log.d(TAG, "Handling interactive input: $command")
@@ -179,7 +202,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             } else if (command.trim() == "clear") {
                 handleClearCommand(session)
             } else {
-                handleRegularCommand(command, session)
+                handleRegularCommand(command, session, commandId)
             }
         }
     }
@@ -194,11 +217,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         welcomeItem?.let { session.commandHistory.add(it) }
     }
     
-    private fun handleRegularCommand(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
+    private fun handleRegularCommand(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData, commandId: String) {
         session.currentCommandOutputBuilder.clear()
         session.currentOutputLineCount = 0
         
         val newCommandItem = CommandHistoryItem(
+            id = commandId,
             prompt = session.currentDirectory,
             command = command,
             output = "",
@@ -208,6 +232,16 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         // Set the current executing command reference for efficient access
         session.currentExecutingCommand = newCommandItem
         session.commandHistory.add(newCommandItem)
+        
+        // 发出命令开始执行事件
+        viewModelScope.launch {
+            _commandExecutionEvents.emit(CommandExecutionEvent(
+                commandId = newCommandItem.id,
+                sessionId = session.id,
+                outputChunk = "",
+                isCompleted = false
+            ))
+        }
     }
 
     fun sendInterruptSignal() {
@@ -231,10 +265,10 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         val session = sessionManager.getSession(sessionId) ?: return
         val currentHistory = session.commandHistory
         if (currentHistory.isEmpty()) {
-            currentHistory.add(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false))
+            currentHistory.add(CommandHistoryItem(id = UUID.randomUUID().toString(), prompt = "", command = "", output = line, isExecuting = false))
         } else {
             val lastItem = currentHistory.last()
-            lastItem.output = if (lastItem.output.isEmpty()) line else lastItem.output + "\n" + line
+            lastItem.setOutput(if (lastItem.output.isEmpty()) line else lastItem.output + "\n" + line)
         }
     }
     

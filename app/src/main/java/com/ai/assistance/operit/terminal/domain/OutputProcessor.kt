@@ -1,9 +1,12 @@
 package com.ai.assistance.operit.terminal.domain
 
 import android.util.Log
+import com.ai.assistance.operit.terminal.CommandExecutionEvent
+import com.ai.assistance.operit.terminal.SessionDirectoryEvent
 import com.ai.assistance.operit.terminal.data.CommandHistoryItem
 import com.ai.assistance.operit.terminal.data.SessionInitState
 import com.ai.assistance.operit.terminal.data.TerminalSessionData
+import java.util.UUID
 
 /**
  * 终端输出的会话处理状态
@@ -17,7 +20,10 @@ private data class SessionProcessingState(
  * 终端输出处理器
  * 负责处理和解析终端输出，更新会话状态
  */
-class OutputProcessor {
+class OutputProcessor(
+    private val onCommandExecutionEvent: (CommandExecutionEvent) -> Unit = {},
+    private val onDirectoryChangeEvent: (SessionDirectoryEvent) -> Unit = {}
+) {
 
     private val sessionStates = mutableMapOf<String, SessionProcessingState>()
 
@@ -146,14 +152,34 @@ class OutputProcessor {
                     // Always append a newline to finalize the line and move to the next.
                     val currentItem = session.currentExecutingCommand
                     if (currentItem != null) {
+                        // Get the line content BEFORE adding the newline.
+                        val builder = session.currentCommandOutputBuilder
+                        val lastNewlineIndex = builder.lastIndexOf('\n')
+                        val finalizedLine = if (lastNewlineIndex != -1) {
+                            builder.substring(lastNewlineIndex + 1)
+                        } else {
+                            builder.toString()
+                        }
+
+                        // Send event if the finalized line is not just whitespace
+                        if (finalizedLine.isNotBlank()) {
+                            onCommandExecutionEvent(CommandExecutionEvent(
+                                commandId = currentItem.id,
+                                sessionId = sessionId,
+                                outputChunk = finalizedLine,
+                                isCompleted = false
+                            ))
+                        }
+
+                        // Now, finalize the line in the buffer.
                         session.currentCommandOutputBuilder.append('\n')
-                        currentItem.output = session.currentCommandOutputBuilder.toString()
+                        currentItem.setOutput(session.currentCommandOutputBuilder.toString())
                     } else {
                         val lastItem = session.commandHistory.lastOrNull()
                         // Check if the last item is a pure output block and not empty
                         lastItem?.let {
                             if (!it.isExecuting && it.prompt.isBlank() && it.command.isBlank() && it.output.isNotEmpty()) {
-                                it.output += "\n"
+                                it.setOutput(it.output + "\n")
                             }
                         }
                     }
@@ -173,6 +199,7 @@ class OutputProcessor {
             Log.d(TAG, "Login successful marker found.")
             sessionManager.getSession(sessionId)?.let { session ->
                 val welcomeHistoryItem = CommandHistoryItem(
+                    id = UUID.randomUUID().toString(),
                     prompt = "",
                     command = "",
                     output = """
@@ -309,6 +336,13 @@ class OutputProcessor {
             sessionManager.updateSession(sessionId) { session ->
                 session.copy(currentDirectory = "$path $")
             }
+            
+            // 发出目录变化事件
+            onDirectoryChangeEvent(SessionDirectoryEvent(
+                sessionId = sessionId,
+                currentDirectory = "$path $"
+            ))
+            
             Log.d(TAG, "Matched CWD prompt. Path: $path")
 
             val outputBeforePrompt = line.substring(0, match.range.first)
@@ -332,6 +366,13 @@ class OutputProcessor {
                 sessionManager.updateSession(sessionId) { session ->
                     session.copy(currentDirectory = "${cleanPrompt} $")
                 }
+                
+                // 发出目录变化事件
+                onDirectoryChangeEvent(SessionDirectoryEvent(
+                    sessionId = sessionId,
+                    currentDirectory = "${cleanPrompt} $"
+                ))
+                
                 Log.d(TAG, "Matched fallback prompt: $cleanPrompt")
                 true
             } else {
@@ -457,15 +498,23 @@ class OutputProcessor {
             builder.append(cleanLine)
 
             // 实时更新当前输出块
-            currentItem.output = builder.toString()
+            currentItem.setOutput(builder.toString())
             session.currentOutputLineCount++
+            
+            // 发出命令执行过程事件
+            onCommandExecutionEvent(CommandExecutionEvent(
+                commandId = currentItem.id,
+                sessionId = sessionId,
+                outputChunk = cleanLine,
+                isCompleted = false
+            ))
 
             if (session.currentOutputLineCount >= MAX_LINES_PER_HISTORY_ITEM) {
                 // 当前页已满，将其添加到已完成的页面列表并开始新的一页
                 currentItem.outputPages.add(currentItem.output)
                 builder.clear()
                 session.currentOutputLineCount = 0
-                currentItem.output = "" // 为新页面清空实时输出
+                currentItem.setOutput("") // 为新页面清空实时输出
             }
         } else {
             // 没有执行中的命令，这是系统输出
@@ -497,7 +546,7 @@ class OutputProcessor {
 
         if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
             // Update history from the builder
-            lastExecutingItem.output = builder.toString().trimEnd()
+            lastExecutingItem.setOutput(builder.toString().trimEnd())
         } else {
             appendProgressOutputToHistory(sessionId, cleanLine, sessionManager)
         }
@@ -517,8 +566,16 @@ class OutputProcessor {
         val lastExecutingItem = session.currentExecutingCommand
 
         if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
-            lastExecutingItem.output = session.currentCommandOutputBuilder.toString().trim()
-            lastExecutingItem.isExecuting = false
+            lastExecutingItem.setOutput(session.currentCommandOutputBuilder.toString().trim())
+            lastExecutingItem.setExecuting(false)
+            
+            // 发出命令完成事件
+            onCommandExecutionEvent(CommandExecutionEvent(
+                commandId = lastExecutingItem.id,
+                sessionId = sessionId,
+                outputChunk = "",
+                isCompleted = true
+            ))
 
             // Clear the reference since command is no longer executing
             session.currentExecutingCommand = null
@@ -539,7 +596,7 @@ class OutputProcessor {
         // 尝试追加到最后一项。如果 lastItem 不为 null 且是纯输出块，则追加。
         val appended = lastItem?.let {
             if (!it.isExecuting && it.prompt.isBlank() && it.command.isBlank()) {
-                it.output = if (it.output.isEmpty()) line else it.output + "\n" + line
+                it.setOutput(if (it.output.isEmpty()) line else it.output + "\n" + line)
                 true // 返回 true 表示追加成功
             } else {
                 false // 不满足追加条件
@@ -548,7 +605,7 @@ class OutputProcessor {
 
         // 如果没有追加成功，则创建一个新的历史记录项
         if (!appended) {
-            currentHistory.add(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false))
+            currentHistory.add(CommandHistoryItem(id = UUID.randomUUID().toString(), prompt = "", command = "", output = line, isExecuting = false))
         }
     }
 
@@ -561,7 +618,7 @@ class OutputProcessor {
         val currentHistory = session.commandHistory
 
         if (currentHistory.isEmpty()) {
-            currentHistory.add(CommandHistoryItem(prompt = "", command = "", output = line, isExecuting = false))
+            currentHistory.add(CommandHistoryItem(id = UUID.randomUUID().toString(), prompt = "", command = "", output = line, isExecuting = false))
         } else {
             val lastItem = currentHistory.last()
 
@@ -578,7 +635,7 @@ class OutputProcessor {
                 lines.add(line)
             }
 
-            lastItem.output = lines.joinToString("\n")
+            lastItem.setOutput(lines.joinToString("\n"))
         }
     }
 

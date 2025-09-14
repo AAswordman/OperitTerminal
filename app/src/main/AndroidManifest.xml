@@ -33,7 +33,11 @@
 
         <service
             android:name=".service.TerminalService"
-            android:exported="true"/>
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.ai.assistance.operit.terminal.service.TerminalService" />
+            </intent-filter>
+        </service>
 
     </application>
 
