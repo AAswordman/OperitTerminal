@@ -30,15 +30,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <service
-            android:name=".service.TerminalService"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.ai.assistance.operit.terminal.service.TerminalService" />
-            </intent-filter>
-        </service>
-
     </application>
 
 </manifest>

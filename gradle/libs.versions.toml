@@ -1,6 +1,6 @@
 [versions]
 agp = "8.6.0"
-kotlin = "1.9.0"
+kotlin = "1.9.22"
 coreKtx = "1.10.1"
 junit = "4.13.2"
 junitVersion = "1.1.5"
@@ -17,16 +17,24 @@ androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "j
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
-androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
-androidx-ui = { group = "androidx.compose.ui", name = "ui" }
-androidx-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
-androidx-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
-androidx-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 androidx-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
-androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
-kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
-kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
+compose-animation = { group = "androidx.compose.animation", name = "animation" }
+compose-animation-core = { group = "androidx.compose.animation", name = "animation-core" }
+androidx-ui-graphics-android = { group = "androidx.compose.ui", name = "ui-graphics-android" }
+androidx-runtime-android = { group = "androidx.compose.runtime", name = "runtime-android" }
+androidx-ui-text-android = { group = "androidx.compose.ui", name = "ui-text-android" }
+androidx-animation-android = { group = "androidx.compose.animation", name = "animation-android" }
+androidx-ui-android = { group = "androidx.compose.ui", name = "ui-android" }
+coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
 androidx-compose-runtime = { group = "androidx.compose.runtime", name = "runtime" }
 
 [plugins]
