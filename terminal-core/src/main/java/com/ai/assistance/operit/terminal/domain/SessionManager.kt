@@ -74,7 +74,7 @@ class SessionManager(private val terminalManager: TerminalManager) {
                 // 清理资源
                 session.readJob?.cancel()
                 session.sessionWriter?.close()
-                terminalManager.closeSession(session.id)
+                terminalManager.closeTerminalSession(session.id)
             } catch (e: Exception) {
                 Log.e("SessionManager", "Error cleaning up session", e)
             }

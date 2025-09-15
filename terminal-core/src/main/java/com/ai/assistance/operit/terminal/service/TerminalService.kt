@@ -7,11 +7,11 @@ import android.os.IBinder
 import android.os.RemoteCallbackList
 import android.util.Log
 import androidx.annotation.RequiresApi
-import com.ai.assistance.operit.terminal.TerminalViewModel
 import com.ai.assistance.operit.terminal.ITerminalCallback
 import com.ai.assistance.operit.terminal.ITerminalService
 import com.ai.assistance.operit.terminal.CommandExecutionEvent
 import com.ai.assistance.operit.terminal.SessionDirectoryEvent
+import com.ai.assistance.operit.terminal.TerminalManager
 import com.ai.assistance.operit.terminal.data.SessionInitState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,17 +27,17 @@ class TerminalService : Service() {
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + job)
 
-    private lateinit var viewModel: TerminalViewModel
+    private lateinit var terminalManager: TerminalManager
     private val callbacks = RemoteCallbackList<ITerminalCallback>()
 
     private val binder = object : ITerminalService.Stub() {
         override fun createSession(): String {
-            val newSession = viewModel.createNewSession()
+            val newSession = terminalManager.createNewSession()
             
             // 阻塞等待会话初始化完成
             runBlocking {
                 withTimeoutOrNull(30000) { // 30秒超时
-                    viewModel.terminalState.first { state ->
+                    terminalManager.terminalState.first { state ->
                         val session = state.sessions.find { it.id == newSession.id }
                         session?.initState == SessionInitState.READY
                     }
@@ -50,19 +50,19 @@ class TerminalService : Service() {
         }
 
         override fun switchToSession(sessionId: String) {
-            viewModel.switchToSession(sessionId)
+            terminalManager.switchToSession(sessionId)
         }
 
         override fun closeSession(sessionId: String) {
-            viewModel.closeSession(sessionId)
+            terminalManager.closeSession(sessionId)
         }
 
         override fun sendCommand(command: String): String {
-            return viewModel.sendCommand(command)
+            return terminalManager.sendCommand(command)
         }
 
         override fun sendInterruptSignal() {
-            viewModel.sendInterruptSignal()
+            terminalManager.sendInterruptSignal()
         }
 
         override fun registerCallback(callback: ITerminalCallback?) {
@@ -80,10 +80,10 @@ class TerminalService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        viewModel = TerminalViewModel(application)
+        terminalManager = TerminalManager.getInstance(applicationContext)
         
         // 监听命令执行事件
-        viewModel.commandExecutionEvents
+        terminalManager.commandExecutionEvents
             .onEach { event ->
                 Log.d("TerminalService", "Received command execution event: $event")
                 broadcastCommandExecutionEvent(event)
@@ -91,7 +91,7 @@ class TerminalService : Service() {
             .launchIn(scope)
             
         // 监听目录变化事件
-        viewModel.directoryChangeEvents
+        terminalManager.directoryChangeEvents
             .onEach { event ->
                 Log.d("TerminalService", "Received directory change event: $event")
                 broadcastDirectoryChangeEvent(event)

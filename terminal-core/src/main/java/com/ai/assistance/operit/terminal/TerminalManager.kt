@@ -19,18 +19,116 @@ import java.io.BufferedInputStream
 import java.io.FileInputStream
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.map
+import com.ai.assistance.operit.terminal.data.TerminalState
+import com.ai.assistance.operit.terminal.data.CommandHistoryItem
+import com.ai.assistance.operit.terminal.domain.SessionManager
+import com.ai.assistance.operit.terminal.domain.OutputProcessor
+import java.util.UUID
+import java.io.OutputStreamWriter
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.update
 
-class TerminalManager(private val context: Context) {
+@RequiresApi(Build.VERSION_CODES.O)
+class TerminalManager private constructor(
+    private val context: Context
+) {
+    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val filesDir: File = context.filesDir
     private val usrDir: File = File(filesDir, "usr")
     private val binDir: File = File(usrDir, "bin")
     private val nativeLibDir: String = context.applicationInfo.nativeLibraryDir
     private val activeSessions = ConcurrentHashMap<String, TerminalSession>()
+    
+    // 核心组件
+    private val sessionManager = SessionManager(this)
+    private val outputProcessor = OutputProcessor(
+        onCommandExecutionEvent = { event ->
+            coroutineScope.launch {
+                _commandExecutionEvents.emit(event)
+            }
+        },
+        onDirectoryChangeEvent = { event ->
+            coroutineScope.launch {
+                _directoryChangeEvents.emit(event)
+            }
+        }
+    )
+    
+    // 状态和事件流
+    private val _commandExecutionEvents = MutableSharedFlow<CommandExecutionEvent>()
+    val commandExecutionEvents: SharedFlow<CommandExecutionEvent> = _commandExecutionEvents.asSharedFlow()
+    
+    private val _directoryChangeEvents = MutableSharedFlow<SessionDirectoryEvent>()
+    val directoryChangeEvents: SharedFlow<SessionDirectoryEvent> = _directoryChangeEvents.asSharedFlow()
+    
+    // 暴露会话管理器的状态
+    val terminalState: StateFlow<TerminalState> = sessionManager.state
+    
+    // 为了向后兼容，提供单独的状态流
+    val sessions = terminalState.map { it.sessions }
+    val currentSessionId = terminalState.map { it.currentSessionId }
+    val commandHistory = terminalState.map { 
+        it.currentSession?.commandHistory ?: androidx.compose.runtime.snapshots.SnapshotStateList<CommandHistoryItem>()
+    }
+    val currentDirectory = terminalState.map { it.currentSession?.currentDirectory ?: "$ " }
+    val isInteractiveMode = terminalState.map { it.currentSession?.isInteractiveMode ?: false }
+    val interactivePrompt = terminalState.map { it.currentSession?.interactivePrompt ?: "" }
+    val isFullscreen = terminalState.map { it.currentSession?.isFullscreen ?: false }
+    val screenContent = terminalState.map { it.currentSession?.screenContent ?: "" }
 
     companion object {
+        @Volatile
+        private var INSTANCE: TerminalManager? = null
+
+        fun getInstance(context: Context): TerminalManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: TerminalManager(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+        
         private const val TAG = "TerminalManager"
         private const val UBUNTU_FILENAME = "ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
+        private const val MAX_HISTORY_ITEMS = 500
+        private const val MAX_OUTPUT_LINES_PER_ITEM = 1000
+    }
+
+    init {
+        // 创建第一个会话
+        createNewSession()
+    }
+    
+    /**
+     * 创建新会话
+     */
+    fun createNewSession(): com.ai.assistance.operit.terminal.data.TerminalSessionData {
+        val newSession = sessionManager.createNewSession()
+        initializeSession(newSession.id)
+        return newSession
+    }
+    
+    /**
+     * 切换到会话
+     */
+    fun switchToSession(sessionId: String) {
+        sessionManager.switchToSession(sessionId)
+    }
+    
+    /**
+     * 关闭会话
+     */
+    fun closeSession(sessionId: String) {
+        sessionManager.closeSession(sessionId)
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -57,6 +155,120 @@ class TerminalManager(private val context: Context) {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create symlink for 'file'", e)
+        }
+    }
+
+    /**
+     * 发送命令
+     */
+    fun sendCommand(command: String): String {
+        val commandId = UUID.randomUUID().toString()
+        sendInput(command, isCommand = true, commandId = commandId)
+        return commandId
+    }
+
+    /**
+     * 发送输入
+     */
+    fun sendInput(input: String, isCommand: Boolean = false, commandId: String? = null) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val session = sessionManager.getCurrentSession() ?: return@launch
+            
+            try {
+                val fullInput = if (isCommand) "$input\n" else input
+                session.sessionWriter?.write(fullInput)
+                session.sessionWriter?.flush()
+                Log.d(TAG, "Sent input. isCommand=$isCommand, input='$fullInput'")
+
+                if (isCommand) {
+                    require(commandId != null) { "commandId must be provided when isCommand is true" }
+                    handleCommandLogic(input, session, commandId)
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending input", e)
+                appendOutputToHistory(session.id, "Error sending input: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 发送中断信号
+     */
+    fun sendInterruptSignal() {
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val currentSession = sessionManager.getCurrentSession()
+                currentSession?.sessionWriter?.apply {
+                    write(3) // ETX character (Ctrl+C)
+                    flush()
+                    Log.d(TAG, "Sent interrupt signal (Ctrl+C) to session ${currentSession.id}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending interrupt signal", e)
+                val currentSession = sessionManager.getCurrentSession()
+                appendOutputToHistory(currentSession?.id ?: "N/A", "Error sending interrupt signal: ${e.message}")
+            }
+        }
+    }
+    
+    private fun initializeSession(sessionId: String) {
+        coroutineScope.launch {
+            val success = initializeEnvironment()
+            if (success) {
+                appendOutputToHistory(sessionId, "Environment initialized. Starting session...")
+                startSession(sessionId)
+            } else {
+                appendOutputToHistory(sessionId, "FATAL: Environment initialization failed. Check logs.")
+            }
+        }
+    }
+
+    private fun startSession(sessionId: String) {
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val terminalSession = startTerminalSession(sessionId)
+                val sessionWriter = terminalSession.stdin.writer()
+                
+                appendOutputToHistory(sessionId, "Session started.")
+                
+                // 发送初始命令来获取提示符
+                sessionWriter.write("echo 'TERMINAL_READY'\n")
+                sessionWriter.flush()
+
+                // 启动读取协程
+                val readJob = launch {
+                    try {
+                        terminalSession.stdout.bufferedReader().use { reader ->
+                            val buffer = CharArray(4096)
+                            var bytesRead: Int
+                            while (reader.read(buffer).also { bytesRead = it } != -1) {
+                                val chunk = String(buffer, 0, bytesRead)
+                                Log.d(TAG, "Read chunk: '$chunk'")
+                                outputProcessor.processOutput(sessionId, chunk, sessionManager)
+                            }
+                        }
+                    } catch (e: java.io.InterruptedIOException) {
+                        Log.i(TAG, "Read job interrupted for session $sessionId.")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in read job for session $sessionId", e)
+                        appendOutputToHistory(sessionId, "Error reading from terminal: ${e.message}")
+                    }
+                }
+                
+                // 更新会话信息
+                sessionManager.updateSession(sessionId) { session ->
+                    session.copy(
+                        terminalSession = terminalSession,
+                        sessionWriter = sessionWriter,
+                        isInitializing = false,
+                        readJob = readJob
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error starting session", e)
+                appendOutputToHistory(sessionId, "Error starting terminal session: ${e.message}")
+            }
         }
     }
 
@@ -399,7 +611,7 @@ class TerminalManager(private val context: Context) {
         return session
     }
 
-    fun closeSession(sessionId: String) {
+    fun closeTerminalSession(sessionId: String) {
         activeSessions[sessionId]?.let { session ->
             session.process.destroy()
             activeSessions.remove(sessionId)
@@ -407,10 +619,103 @@ class TerminalManager(private val context: Context) {
         }
     }
 
+    private fun handleCommandLogic(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData, commandId: String) {
+        if (session.isWaitingForInteractiveInput) {
+            // Interactive mode: input is part of the previous command's output
+            Log.d(TAG, "Handling interactive input: $command")
+            sessionManager.updateSession(session.id) {
+                it.copy(
+                    isWaitingForInteractiveInput = false,
+                    lastInteractivePrompt = "",
+                    isInteractiveMode = false,
+                    interactivePrompt = ""
+                )
+            }
+        } else {
+            // Normal command or input for a persistent interactive session (like node)
+            if (session.isInteractiveMode) {
+                // In persistent interactive mode, we don't create a new history item.
+                // The input is just sent to the running process.
+                // The output will be handled by the OutputProcessor.
+                Log.d(TAG, "Sending input to interactive session: $command")
+            } else if (command.trim() == "clear") {
+                handleClearCommand(session)
+            } else {
+                handleRegularCommand(command, session, commandId)
+            }
+        }
+    }
+    
+    private fun handleClearCommand(session: com.ai.assistance.operit.terminal.data.TerminalSessionData) {
+        // Special handling for clear command: keep welcome message
+        val welcomeItem = session.commandHistory.firstOrNull {
+            it.prompt.isEmpty() && it.command.isEmpty() && it.output.contains("Operit")
+        }
+        
+        session.commandHistory.clear()
+        welcomeItem?.let { session.commandHistory.add(it) }
+    }
+    
+    private fun handleRegularCommand(command: String, session: com.ai.assistance.operit.terminal.data.TerminalSessionData, commandId: String) {
+        session.currentCommandOutputBuilder.clear()
+        session.currentOutputLineCount = 0
+        
+        val newCommandItem = CommandHistoryItem(
+            id = commandId,
+            prompt = session.currentDirectory,
+            command = command,
+            output = "",
+            isExecuting = true
+        )
+        
+        // Set the current executing command reference for efficient access
+        session.currentExecutingCommand = newCommandItem
+        session.commandHistory.add(newCommandItem)
+        
+        // 发出命令开始执行事件
+        coroutineScope.launch {
+            _commandExecutionEvents.emit(CommandExecutionEvent(
+                commandId = newCommandItem.id,
+                sessionId = session.id,
+                outputChunk = "",
+                isCompleted = false
+            ))
+        }
+    }
+    
+    private suspend fun appendOutputToHistory(sessionId: String, output: String) {
+        withContext(Dispatchers.Main) {
+            sessionManager.updateSession(sessionId) { session ->
+                val currentHistory = session.commandHistory.toMutableList()
+                val outputLines = output.split("\n")
+
+                if (currentHistory.isEmpty()) {
+                    currentHistory.addAll(outputLines.map { CommandHistoryItem(id = UUID.randomUUID().toString(), prompt = "", command = "", output = it, isExecuting = false) })
+                } else {
+                    val lastItem = currentHistory.last()
+                    val firstNewLine = outputLines.first()
+
+                    if (lastItem.output.endsWith("\u001B[?2004l")) {
+                        lastItem.setOutput(lastItem.output + firstNewLine)
+                        if (outputLines.size > 1) {
+                            currentHistory.addAll(outputLines.drop(1).map { CommandHistoryItem(id = UUID.randomUUID().toString(), prompt = "", command = "", output = it, isExecuting = false) })
+                        }
+                    } else {
+                        currentHistory.addAll(outputLines.map { CommandHistoryItem(id = UUID.randomUUID().toString(), prompt = "", command = "", output = it, isExecuting = false) })
+                    }
+                }
+                
+                session.copy(commandHistory = androidx.compose.runtime.mutableStateListOf<CommandHistoryItem>().apply { addAll(currentHistory) })
+            }
+        }
+    }
+
     fun cleanup() {
         activeSessions.keys.forEach { sessionId ->
-            closeSession(sessionId)
+            closeTerminalSession(sessionId)
         }
+        sessionManager.cleanup()
+        coroutineScope.cancel()
         Log.d(TAG, "All active sessions cleaned up.")
     }
 } 

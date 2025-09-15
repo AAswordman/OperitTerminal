@@ -18,9 +18,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.ui.platform.LocalContext
 import com.ai.assistance.operit.terminal.data.CommandHistoryItem
 
 class MainActivity : ComponentActivity() {
@@ -42,14 +42,16 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize(),
                 color = Color.Black
             ) {
-                val terminalViewModel: TerminalViewModel = viewModel()
-                val sessions by terminalViewModel.sessions.collectAsState(initial = emptyList())
-                val currentSessionId by terminalViewModel.currentSessionId.collectAsState(initial = null)
-                val commandHistory by terminalViewModel.commandHistory.collectAsState(initial = SnapshotStateList<CommandHistoryItem>())
-                val currentDirectory by terminalViewModel.currentDirectory.collectAsState(initial = "$ ")
+                val context = LocalContext.current
+                val terminalManager = remember { TerminalManager.getInstance(context) }
+                
+                val sessions by terminalManager.sessions.collectAsState(initial = emptyList())
+                val currentSessionId by terminalManager.currentSessionId.collectAsState(initial = null)
+                val commandHistory by terminalManager.commandHistory.collectAsState(initial = SnapshotStateList<CommandHistoryItem>())
+                val currentDirectory by terminalManager.currentDirectory.collectAsState(initial = "$ ")
                 var command by remember { mutableStateOf("") }
-                val isFullscreen by terminalViewModel.isFullscreen.collectAsState(initial = false)
-                val screenContent by terminalViewModel.screenContent.collectAsState(initial = "")
+                val isFullscreen by terminalManager.isFullscreen.collectAsState(initial = false)
+                val screenContent by terminalManager.screenContent.collectAsState(initial = "")
 
                 TerminalScreen(
                     sessions = sessions,
@@ -63,17 +65,17 @@ class MainActivity : ComponentActivity() {
                     onSendInput = { inputText, isCommand ->
                         if (inputText.isNotBlank()) {
                             if (isCommand) {
-                                terminalViewModel.sendCommand(inputText)
+                                terminalManager.sendCommand(inputText)
                                 command = ""
                             } else {
-                                terminalViewModel.sendInput(inputText)
+                                terminalManager.sendInput(inputText)
                             }
                         }
                     },
-                    onInterrupt = { terminalViewModel.sendInterruptSignal() },
-                    onNewSession = { terminalViewModel.createNewSession() },
-                    onSwitchSession = { sessionId -> terminalViewModel.switchToSession(sessionId) },
-                    onCloseSession = { sessionId -> terminalViewModel.closeSession(sessionId) }
+                    onInterrupt = { terminalManager.sendInterruptSignal() },
+                    onNewSession = { terminalManager.createNewSession() },
+                    onSwitchSession = { sessionId -> terminalManager.switchToSession(sessionId) },
+                    onCloseSession = { sessionId -> terminalManager.closeSession(sessionId) }
                 )
             }
         }
