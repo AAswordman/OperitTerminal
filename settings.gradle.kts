@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "My Application"
+rootProject.name = "OperitTerminal"
 include(":app")
 include(":terminal-core")
