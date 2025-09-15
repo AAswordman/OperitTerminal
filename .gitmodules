@@ -1,0 +1,3 @@
+[submodule "terminal-core"]
+	path = terminal-core
+	url = https://github.com/AAswordman/OperitTerminalCore.git
