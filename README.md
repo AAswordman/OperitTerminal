@@ -1,71 +1,40 @@
 ﻿# Operit Terminal
 
-一个在Android上运行Ubuntu环境的终端应用。
+An Android terminal application that runs a Ubuntu environment.
 
-## 项目描述
+## Project Description
 
-这是一个Android终端应用，集成了Ubuntu环境，允许用户在Android设备上运行Linux命令和工具。
+This is an Android terminal application that integrates a Ubuntu environment, allowing users to run Linux commands and tools on their Android devices.
 
-## 架构和AIDL接口
+## Technology Stack
 
-`Operit Terminal` 采用客户端-服务端（Client-Service）架构，核心功能在一个后台的 `TerminalService` 中运行。UI（例如 Activity）作为客户端，通过 AIDL (Android Interface Definition Language) 与服务进行通信。这种设计确保了即使用户切换应用，终端会话也能在后台持续运行。
+-   **UI**: Built entirely with [Jetpack Compose](https://developer.android.com/jetpack/compose), Android's modern toolkit for building native UI.
+-   **Architecture**: Follows a reactive architecture, using [Kotlin Flows](https://developer.android.com/kotlin/flow) to handle state management and event propagation between the core logic and the UI.
+-   **Asynchronous Programming**: Utilizes [Kotlin Coroutines](https://kotlinlang.org/docs/coroutines-overview.html) for managing background threads and asynchronous operations.
+-   **Modularity**: The project is divided into an `app` module for the UI and a `terminal-core` module (as a Git Submodule) for the backend logic.
 
-### 概述
+## Project Structure
 
-`TerminalService` 是一个 Android `Service`，它负责：
+本应用采用模块化设计，主要分为以下两个部分：
 
--   创建和管理多个终端会话。
--   处理命令的发送和中断信号。
--   维护每个会话的状态，包括命令历史、当前目录等。
--   通过事件回调机制将命令执行更新和会话变化通知给客户端。
+-   **`app` 模块**: 包含应用的用户界面（UI）和与 Android 系统交互的主要逻辑。
+-   **`terminal-core` 模块 (Git Submodule)**: 这是一个独立的模块，包含了终端的核心功能，如会话管理、命令执行和与底层 shell 的交互。它被设计为一个可重用的组件，并通过 AIDL 接口与主 `app` 模块通信。
 
-客户端通过绑定到该服务并使用 `ITerminalService` 接口与服务进行通信。
+关于如何克隆和更新包含子模块的仓库，请参考下面的 “获取源码” 部分。
 
-### 连接到服务
+## Architecture Overview
 
-要使用 `TerminalService`，您需要从您的组件（例如 `Activity`）中绑定到它。
+`Operit Terminal` is built on a modular architecture centered around the `TerminalManager` class, which resides in the `terminal-core` module.
 
-```kotlin
-// 在你的 Activity 或其他组件中
+-   **`TerminalManager` (in `terminal-core`)**: This singleton class is the heart of the application. It manages all terminal sessions, processes commands, and holds the entire state of the terminal (e.g., sessions, command history, current directory). It exposes this state reactively using Kotlin Flows.
 
-private var terminalService: ITerminalService? = null
-private var isServiceBound = false
+-   **`MainActivity` (in `app`)**: The main UI of the application, built with Jetpack Compose. It directly interacts with the `TerminalManager` to send commands and listens to its Kotlin Flows (`collectAsState`) to automatically update the UI whenever the terminal state changes.
 
-private val connection = object : ServiceConnection {
-    override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-        terminalService = ITerminalService.Stub.asInterface(service)
-        isServiceBound = true
-        // 服务已连接，现在可以进行交互了
-        // 例如，注册回调并请求初始状态
-        terminalService?.registerCallback(terminalCallback)
-        terminalService?.requestStateUpdate()
-    }
+-   **`TerminalService` and AIDL (in `terminal-core`)**: While the current implementation has the UI and the core logic running in the same process, the `terminal-core` module also includes a `TerminalService`. This service exposes the `TerminalManager`'s functionality through an AIDL interface, enabling robust background execution and inter-process communication (IPC). This design makes it possible to run the terminal session independently of the UI lifecycle.
 
-    override fun onServiceDisconnected(name: ComponentName?) {
-        terminalService = null
-        isServiceBound = false
-    }
-}
+### AIDL Interface Details
 
-override fun onStart() {
-    super.onStart()
-    Intent(this, TerminalService::class.java).also { intent ->
-        bindService(intent, connection, Context.BIND_AUTO_CREATE)
-    }
-}
-
-override fun onStop() {
-    super.onStop()
-    if (isServiceBound) {
-        // 取消注册回调
-        terminalService?.unregisterCallback(terminalCallback)
-        unbindService(connection)
-        isServiceBound = false
-    }
-}
-```
-
-### AIDL 接口
+The AIDL interface is defined for communication with the `TerminalService`.
 
 #### `ITerminalService.aidl`
 
@@ -80,7 +49,7 @@ override fun onStop() {
 | `sendInterruptSignal` | -                                  | `void`   | 向当前会话发送中断信号 (Ctrl+C)。              |
 | `registerCallback`    | `in ITerminalCallback callback`    | `void`   | 注册一个回调以接收终端事件更新。               |
 | `unregisterCallback`  | `in ITerminalCallback callback`    | `void`   | 取消注册一个回调。                             |
-| `requestStateUpdate`  | -                                  | `void`   | 请求立即获取一次最新的终端状态。               |
+| `requestStateUpdate`  | -                                  | `void`   | Requests an immediate, one-time update of the latest terminal state. |
 
 #### `ITerminalCallback.aidl`
 
@@ -89,9 +58,9 @@ override fun onStop() {
 | 方法名                        | 参数                                      | 描述                                     |
 | ---------------------------- | ----------------------------------------- | ---------------------------------------- |
 | `onCommandExecutionUpdate`   | `in CommandExecutionEvent event`         | 当命令执行过程中有输出更新时调用此方法。   |
-| `onSessionDirectoryChanged`  | `in SessionDirectoryEvent event`         | 当会话的当前目录发生变化时调用此方法。     |
+| `onSessionDirectoryChanged`  | `in SessionDirectoryEvent event`         | This method is called when the current directory of a session changes.     |
 
-### 数据模型
+### Data Models
 
 AIDL 接口使用以下事件对象来传输数据：
 
@@ -105,58 +74,37 @@ AIDL 接口使用以下事件对象来传输数据：
 #### `SessionDirectoryEvent`
 表示会话目录变化事件，包含以下字段：
 -   `sessionId: String`: 会话的唯一标识符
--   `currentDirectory: String`: 会话的当前工作目录
+-   `currentDirectory: String`: The session's new current working directory
 
-### 使用示例
+### UI and State Handling Example
 
-以下是一个实现 `ITerminalCallback` 并与服务交互的简化示例：
+The UI in `MainActivity` is built with Jetpack Compose and subscribes to state changes from `TerminalManager` using Kotlin Flows. This creates a reactive connection where the UI automatically recomposes when data changes.
+
+Here is a simplified conceptual example of how the UI collects state:
 
 ```kotlin
-// 在你的 Activity 或 ViewModel 中
+// In MainActivity's Composable content
 
-private val terminalCallback = object : ITerminalCallback.Stub() {
-    override fun onCommandExecutionUpdate(event: CommandExecutionEvent?) {
-        // 在主线程上处理命令执行更新
-        activity?.runOnUiThread {
-            event?.let {
-                // 处理命令输出更新
-                Log.d("TerminalClient", "Command ${it.commandId} output: ${it.outputChunk}")
-                if (it.isCompleted) {
-                    Log.d("TerminalClient", "Command ${it.commandId} completed")
-                }
-                // 更新你的 UI
-                // 例如: updateCommandOutput(it)
-            }
-        }
-    }
+// Get the TerminalManager instance
+val terminalManager = remember { TerminalManager.getInstance(context) }
 
-    override fun onSessionDirectoryChanged(event: SessionDirectoryEvent?) {
-        // 在主线程上处理目录变化
-        activity?.runOnUiThread {
-            event?.let {
-                Log.d("TerminalClient", "Session ${it.sessionId} directory changed to: ${it.currentDirectory}")
-                // 更新你的 UI
-                // 例如: updateCurrentDirectory(it)
-            }
-        }
-    }
-}
+// Collect state from Flows
+val sessions by terminalManager.sessions.collectAsState(initial = emptyList())
+val currentSessionId by terminalManager.currentSessionId.collectAsState(initial = null)
+val commandHistory by terminalManager.commandHistory.collectAsState(initial = SnapshotStateList())
+val currentDirectory by terminalManager.currentDirectory.collectAsState(initial = "$ ")
 
-// 创建一个新的会话
-fun createNewSession() {
-    if (isServiceBound) {
-        val newSessionId = terminalService?.createSession()
-        Log.d("TerminalClient", "Created new session: $newSessionId")
-    }
-}
-
-// 发送命令
-fun sendCommandToTerminal(command: String) {
-    if (isServiceBound) {
-        terminalService?.sendCommand(command)
-    }
-}
+// The UI will automatically update when any of these state holders change.
+TerminalScreen(
+    sessions = sessions,
+    currentSessionId = currentSessionId,
+    commandHistory = commandHistory,
+    currentDirectory = currentDirectory,
+    // ... other parameters and event handlers
+)
 ```
+
+This reactive approach simplifies UI logic, as it doesn't need to manually request updates. It just observes the state provided by `TerminalManager`.
 
 ## 构建配置
 
@@ -189,3 +137,17 @@ RELEASE_STORE_PASSWORD=你的密钥库密码
 ## 许可证
 
 遵循 GPLv3 协议。
+
+## 获取源码
+
+由于本项目使用了 Git Submodule 来管理核心依赖 (`terminal-core`)，请使用以下命令来克隆仓库以确保所有模块都被正确下载：
+
+```bash
+git clone --recurse-submodules https://github.com/your-username/your-repository.git
+```
+
+如果你已经克隆了仓库但没有初始化子模块，可以运行以下命令：
+
+```bash
+git submodule update --init --recursive
+```
