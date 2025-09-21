@@ -15,6 +15,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.ai.assistance.operit.terminal.view.TerminalScreen
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import android.util.Log
 
 
 class MainActivity : ComponentActivity() {
@@ -31,14 +34,27 @@ class MainActivity : ComponentActivity() {
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
 
+        // 3. 创建TerminalManager实例
+        val terminalManager = TerminalManager.getInstance(this)
+        
+        // 4. 创建初始会话
+        lifecycleScope.launch {
+            try {
+                terminalManager.createNewSession("Default Session")
+                Log.d("MainActivity", "Initial session created successfully")
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to create initial session", e)
+            }
+        }
+
         setContent {
             Surface(
                 modifier = Modifier.fillMaxSize(),
                 color = Color.Black
             ) {
                 val context = LocalContext.current
-                val terminalManager = remember { TerminalManager.getInstance(context) }
-                val terminalEnv = rememberTerminalEnv(terminalManager)
+                val terminalManagerInCompose = remember { TerminalManager.getInstance(context) }
+                val terminalEnv = rememberTerminalEnv(terminalManagerInCompose)
 
                 TerminalScreen(
                     env = terminalEnv
