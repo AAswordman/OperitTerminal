@@ -1,19 +1,27 @@
 ﻿# Operit Terminal
 
-An Android terminal application that runs a Ubuntu environment.
+<p align="center">
+  <img src="docs/9f85b39450c8616909039b66d15a475a.jpg" alt="Operit Terminal" width="300"/>
+</p>
 
-## Project Description
+## 概述
 
-This is an Android terminal application that integrates a Ubuntu environment, allowing users to run Linux commands and tools on their Android devices.
+这是一款在 Android 设备上运行的 Ubuntu 24 系统，作为核心组件被集成于 Operit 应用中，为用户提供了一个功能完整、性能强大的移动 Linux 环境。其最大的优势在于与 Operit 的深度集成，提供无缝衔接的开发与操作体验。
 
-## Technology Stack
+## 主要特性
 
--   **UI**: Built entirely with [Jetpack Compose](https://developer.android.com/jetpack/compose), Android's modern toolkit for building native UI.
--   **Architecture**: Follows a reactive architecture, using [Kotlin Flows](https://developer.android.com/kotlin/flow) to handle state management and event propagation between the core logic and the UI.
--   **Asynchronous Programming**: Utilizes [Kotlin Coroutines](https://kotlinlang.org/docs/coroutines-overview.html) for managing background threads and asynchronous operations.
--   **Modularity**: The project is divided into an `app` module for the UI and a `terminal-core` module (as a Git Submodule) for the backend logic.
+- **完整的 Ubuntu 24 环境**: 在 Android 设备上提供桌面级的 Linux 体验。
+- **一键环境配置**: 内置自动化脚本，简化了环境的配置和部署过程。
+- **开放的 AIDL 接口**: 通过 AIDL (`Android Interface Definition Language`) 暴露核心功能，允许其他应用安全地进行进程间通信和功能调用，方便开发者进行扩展和集成。
 
-## Project Structure
+## 技术栈
+
+-   **UI**: 完全使用 [Jetpack Compose](https://developer.android.com/jetpack/compose) 构建，这是 Android 用于构建原生 UI 的现代工具包。
+-   **架构**: 遵循响应式架构，使用 [Kotlin Flows](https://developer.android.com/kotlin/flow) 处理核心逻辑与 UI 之间的状态管理和事件传播。
+-   **异步编程**: 利用 [Kotlin Coroutines](https://kotlinlang.org/docs/coroutines-overview.html) 管理后台线程和异步操作。
+-   **模块化**: 项目分为 `app` 模块（用于 UI）和 `terminal-core` 模块（作为 Git 子模块，用于后端逻辑）。
+
+## 项目结构
 
 本应用采用模块化设计，主要分为以下两个部分：
 
@@ -22,19 +30,19 @@ This is an Android terminal application that integrates a Ubuntu environment, al
 
 关于如何克隆和更新包含子模块的仓库，请参考下面的 “获取源码” 部分。
 
-## Architecture Overview
+## 架构概述
 
-`Operit Terminal` is built on a modular architecture centered around the `TerminalManager` class, which resides in the `terminal-core` module.
+`Operit Terminal` 构建在一个以 `TerminalManager` 类为中心的模块化架构之上，该类位于 `terminal-core` 模块中。
 
--   **`TerminalManager` (in `terminal-core`)**: This singleton class is the heart of the application. It manages all terminal sessions, processes commands, and holds the entire state of the terminal (e.g., sessions, command history, current directory). It exposes this state reactively using Kotlin Flows.
+-   **`TerminalManager` (在 `terminal-core` 中)**: 这个单例类是应用的核心。它管理所有终端会话，处理命令，并持有终端的全部状态（例如，会话、命令历史、当前目录）。它使用 Kotlin Flows 以响应式的方式暴露这些状态。
 
--   **`MainActivity` (in `app`)**: The main UI of the application, built with Jetpack Compose. It directly interacts with the `TerminalManager` to send commands and listens to its Kotlin Flows (`collectAsState`) to automatically update the UI whenever the terminal state changes.
+-   **`MainActivity` (在 `app` 中)**: 应用的主 UI，使用 Jetpack Compose 构建。它直接与 `TerminalManager` 交互以发送命令，并监听其 Kotlin Flows (`collectAsState`)，以便在终端状态发生变化时自动更新 UI。
 
--   **`TerminalService` and AIDL (in `terminal-core`)**: While the current implementation has the UI and the core logic running in the same process, the `terminal-core` module also includes a `TerminalService`. This service exposes the `TerminalManager`'s functionality through an AIDL interface, enabling robust background execution and inter-process communication (IPC). This design makes it possible to run the terminal session independently of the UI lifecycle.
+-   **`TerminalService` 和 AIDL (在 `terminal-core` 中)**: 虽然当前实现中 UI 和核心逻辑运行在同一进程中，但 `terminal-core` 模块也包含一个 `TerminalService`。该服务通过 AIDL 接口暴露 `TerminalManager` 的功能，从而实现了强大的后台执行和进程间通信（IPC）。这种设计使得终端会话可以独立于 UI 生命周期运行。
 
-### AIDL Interface Details
+### AIDL 接口详情
 
-The AIDL interface is defined for communication with the `TerminalService`.
+AIDL 接口用于与 `TerminalService` 进行通信。
 
 #### `ITerminalService.aidl`
 
@@ -49,7 +57,7 @@ The AIDL interface is defined for communication with the `TerminalService`.
 | `sendInterruptSignal` | -                                  | `void`   | 向当前会话发送中断信号 (Ctrl+C)。              |
 | `registerCallback`    | `in ITerminalCallback callback`    | `void`   | 注册一个回调以接收终端事件更新。               |
 | `unregisterCallback`  | `in ITerminalCallback callback`    | `void`   | 取消注册一个回调。                             |
-| `requestStateUpdate`  | -                                  | `void`   | Requests an immediate, one-time update of the latest terminal state. |
+| `requestStateUpdate`  | -                                  | `void`   | 请求立即一次性更新最新的终端状态。 |
 
 #### `ITerminalCallback.aidl`
 
@@ -58,9 +66,9 @@ The AIDL interface is defined for communication with the `TerminalService`.
 | 方法名                        | 参数                                      | 描述                                     |
 | ---------------------------- | ----------------------------------------- | ---------------------------------------- |
 | `onCommandExecutionUpdate`   | `in CommandExecutionEvent event`         | 当命令执行过程中有输出更新时调用此方法。   |
-| `onSessionDirectoryChanged`  | `in SessionDirectoryEvent event`         | This method is called when the current directory of a session changes.     |
+| `onSessionDirectoryChanged`  | `in SessionDirectoryEvent event`         | 当会话的当前目录更改时调用此方法。     |
 
-### Data Models
+### 数据模型
 
 AIDL 接口使用以下事件对象来传输数据：
 
@@ -74,37 +82,37 @@ AIDL 接口使用以下事件对象来传输数据：
 #### `SessionDirectoryEvent`
 表示会话目录变化事件，包含以下字段：
 -   `sessionId: String`: 会话的唯一标识符
--   `currentDirectory: String`: The session's new current working directory
+-   `currentDirectory: String`: 会话新的当前工作目录
 
-### UI and State Handling Example
+### UI 和状态处理示例
 
-The UI in `MainActivity` is built with Jetpack Compose and subscribes to state changes from `TerminalManager` using Kotlin Flows. This creates a reactive connection where the UI automatically recomposes when data changes.
+`MainActivity` 中的 UI 是用 Jetpack Compose 构建的，并通过 Kotlin Flows 订阅来自 `TerminalManager` 的状态变化。这就创建了一个响应式连接，当数据变化时 UI 会自动重组。
 
-Here is a simplified conceptual example of how the UI collects state:
+以下是一个简化的概念性示例，说明 UI 如何收集状态：
 
 ```kotlin
-// In MainActivity's Composable content
+// 在 MainActivity 的 Composable 内容中
 
-// Get the TerminalManager instance
+// 获取 TerminalManager 实例
 val terminalManager = remember { TerminalManager.getInstance(context) }
 
-// Collect state from Flows
+// 从 Flows 中收集状态
 val sessions by terminalManager.sessions.collectAsState(initial = emptyList())
 val currentSessionId by terminalManager.currentSessionId.collectAsState(initial = null)
 val commandHistory by terminalManager.commandHistory.collectAsState(initial = SnapshotStateList())
 val currentDirectory by terminalManager.currentDirectory.collectAsState(initial = "$ ")
 
-// The UI will automatically update when any of these state holders change.
+// 当任何这些状态持有者发生变化时，UI 将自动更新。
 TerminalScreen(
     sessions = sessions,
     currentSessionId = currentSessionId,
     commandHistory = commandHistory,
     currentDirectory = currentDirectory,
-    // ... other parameters and event handlers
+    // ... 其他参数和事件处理程序
 )
 ```
 
-This reactive approach simplifies UI logic, as it doesn't need to manually request updates. It just observes the state provided by `TerminalManager`.
+这种响应式方法简化了 UI 逻辑，因为它不需要手动请求更新，只需观察 `TerminalManager` 提供的状态即可。
 
 ## 构建配置
 
